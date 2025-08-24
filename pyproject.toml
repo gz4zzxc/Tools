@@ -1,0 +1,15 @@
+[project]
+name = "llm-tools-test"
+version = "0.1.0"
+description = "OpenAI 格式模型工具使用测试脚本"
+requires-python = ">=3.8.1"
+dependencies = [
+    "openai>=1.0.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
