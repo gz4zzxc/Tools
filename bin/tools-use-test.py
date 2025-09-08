@@ -93,9 +93,11 @@ def test_basic_chat(client: OpenAI, model_name: str) -> bool:
             max_tokens=100
         )
         end_ts = time.perf_counter()
+        ttft_ms = max((end_ts - start_ts) * 1000.0, 0.0)
         print("✅ 基本聊天功能正常")
         message = response.choices[0].message
         print(f"回复: {message.content}")
+        print(f"⏳ 首字延迟（TTFT）: {ttft_ms:.0f} ms")
 
         # 统计输出 tokens 与速率
         completion_tokens = None
@@ -139,6 +141,7 @@ def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletion
             max_tokens=200
         )
         end_ts = time.perf_counter()
+        ttft_ms = max((end_ts - start_ts) * 1000.0, 0.0)
         
         message = response.choices[0].message
         if message.tool_calls:
@@ -146,6 +149,7 @@ def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletion
             for tool_call in message.tool_calls:
                 print(f"工具名称: {tool_call.function.name}")
                 print(f"参数: {tool_call.function.arguments}")
+            print(f"⏳ 首字延迟（TTFT）: {ttft_ms:.0f} ms")
             # 统计输出 tokens 与速率（以 usage 为准，若无则估算为 0）
             completion_tokens = None
             try:
@@ -164,6 +168,7 @@ def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletion
         else:
             print("⚠️  模型没有调用工具，但请求成功")
             print(f"回复: {message.content}")
+            print(f"⏳ 首字延迟（TTFT）: {ttft_ms:.0f} ms")
             # 统计输出 tokens 与速率
             completion_tokens = None
             try:
