@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-OpenAI 格式模型工具使用测试脚本
-支持交互式输入参数，测试模型是否支持工具调用
+OpenAI 格式模型功能测试脚本
+支持交互式输入参数，测试模型是否支持：
+- 基本聊天功能
+- 工具调用功能
+- 流式响应
+- 图片输入支持
 """
 
 import json
@@ -36,6 +40,12 @@ def get_model_parameters() -> Dict[str, str]:
         "api_key": api_key,
         "model_name": model_name
     }
+
+
+def get_test_image_url() -> str:
+    """获取测试图片的 URL"""
+    # 使用一个公开的测试图片 URL
+    return "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
 
 def create_test_tools() -> list[ChatCompletionToolParam]:
@@ -286,6 +296,83 @@ def test_streaming_with_tools(client: OpenAI, model_name: str, tools: list[ChatC
         return False
 
 
+def test_image_support(client: OpenAI, model_name: str) -> bool:
+    """测试模型是否支持图片输入"""
+    print("\n=== 测试图片支持功能 ===")
+    try:
+        # 获取测试图片 URL
+        test_image_url = get_test_image_url()
+        
+        # 构建包含图片的消息
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "请描述一下这张图片的内容"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": test_image_url
+                        }
+                    }
+                ]
+            }
+        ]
+        
+        start_ts = time.perf_counter()
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_tokens=200
+        )
+        end_ts = time.perf_counter()
+        
+        message = response.choices[0].message
+        if message.content:
+            print("✅ 模型支持图片输入！")
+            print(f"图片描述: {message.content}")
+            
+            # 统计输出 tokens 与速率
+            completion_tokens = None
+            try:
+                if getattr(response, "usage", None) and getattr(response.usage, "completion_tokens", None) is not None:
+                    completion_tokens = int(response.usage.completion_tokens)
+            except Exception:
+                completion_tokens = None
+
+            def _estimate_tokens(text: str) -> int:
+                if not text:
+                    return 0
+                cjk = re.findall(r"[\u4e00-\u9fff]", text)
+                cjk_count = len(cjk)
+                non_cjk_count = len(text) - cjk_count
+                approx = cjk_count + math.ceil(non_cjk_count / 4)
+                return max(approx, 1) if text.strip() else 0
+
+            if completion_tokens is None:
+                completion_tokens = _estimate_tokens(message.content or "")
+
+            total_s = max(end_ts - start_ts, 1e-9)
+            tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
+            print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+            return True
+        else:
+            print("⚠️  模型接受了图片输入但没有返回内容")
+            return False
+            
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "vision" in error_msg or "image" in error_msg or "multimodal" in error_msg:
+            print("❌ 模型不支持图片输入")
+            print(f"错误信息: {e}")
+        else:
+            print(f"❌ 图片支持测试失败: {e}")
+        return False
+
+
 def main():
     """主函数"""
     try:
@@ -311,17 +398,28 @@ def main():
         # 测试流式工具使用
         streaming_success = test_streaming_with_tools(client, params['model_name'], tools)
         
+        # 测试图片支持
+        image_success = test_image_support(client, params['model_name'])
+        
         # 总结测试结果
         print("\n" + "="*50)
         print("测试结果总结:")
         print(f"基本聊天功能: {'✅ 通过' if basic_success else '❌ 失败'}")
         print(f"工具使用功能: {'✅ 通过' if tools_success else '❌ 失败'}")
         print(f"流式工具使用: {'✅ 通过' if streaming_success else '❌ 失败'}")
+        print(f"图片支持功能: {'✅ 通过' if image_success else '❌ 失败'}")
         
+        # 功能支持总结
+        print("\n功能支持总结:")
         if tools_success:
-            print("\n🎉 该模型支持工具使用！")
+            print("🎉 该模型支持工具使用！")
         else:
-            print("\n⚠️  该模型可能不支持工具使用")
+            print("⚠️  该模型可能不支持工具使用")
+            
+        if image_success:
+            print("🖼️  该模型支持图片输入！")
+        else:
+            print("⚠️  该模型可能不支持图片输入")
             
     except KeyboardInterrupt:
         print("\n\n用户中断操作")
