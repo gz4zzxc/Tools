@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# 更安全的 Bash 选项
+set -Eeuo pipefail
+IFS=$'\n\t'
+export DEBIAN_FRONTEND=noninteractive
+
 # 设置颜色变量
 Green="\033[32m"
 Yellow="\033[33m"
@@ -22,18 +27,21 @@ check_root() {
 # 检测服务器是否位于中国
 geo_check() {
     echo "检测服务器地理位置..."
-    api_list=("https://www.cloudflare.com/cdn-cgi/trace" "https://dash.cloudflare.com/cdn-cgi/trace" "https://cf-ns.com/cdn-cgi/trace")
+    api_list=(
+        "https://www.cloudflare.com/cdn-cgi/trace"
+        "https://dash.cloudflare.com/cdn-cgi/trace"
+        "https://cf-ns.com/cdn-cgi/trace"
+    )
     ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     success=0
 
     for url in "${api_list[@]}"; do
-        response=$(curl -A "$ua" -m 10 -s "$url")
-        if [ $? -ne 0 ] || [ -z "$response" ]; then
+        if ! response=$(curl -4 -fSL -A "$ua" -m 8 -s "$url" 2>/dev/null); then
             echo -e "${Yellow}无法访问 ${url}，尝试下一个 API...${Font}"
             continue
         fi
 
-        loc=$(echo "$response" | grep -oP 'loc=\K\w+')
+        loc=$(printf '%s\n' "$response" | awk -F= '/^loc=/{print $2; exit}' | tr -d '\r')
         if [ "$loc" = "CN" ]; then
             isCN=true
             echo -e "${Green}服务器位中国.${Font}"
@@ -56,15 +64,47 @@ geo_check() {
 detect_os() {
     if [ -e /etc/os-release ]; then
         . /etc/os-release
-        OS=$ID
-        CODENAME=$VERSION_CODENAME
+        OS=${ID:-}
+        CODENAME=${VERSION_CODENAME:-}
+        VERSION_ID=${VERSION_ID:-}
 
+        # 对于某些系统没有 VERSION_CODENAME 的情况进行兜底
         if [ -z "$CODENAME" ]; then
-            # 对于某些 Debian 或 Ubuntu 版本没有 VERSION_CODENAME 的情况
-            CODENAME=$(lsb_release -cs)
+            # Ubuntu 常见兜底
+            if [ "${OS}" = "ubuntu" ] && [ -n "${UBUNTU_CODENAME:-}" ]; then
+                CODENAME=${UBUNTU_CODENAME}
+            elif command -v lsb_release >/dev/null 2>&1; then
+                CODENAME=$(lsb_release -cs || true)
+            fi
         fi
 
-        echo -e "${Green}检测到的操作系统：${OS}, 代号：${CODENAME}${Font}"
+        # 最后再基于 VERSION_ID 做一次简单映射兜底
+        if [ -z "$CODENAME" ] && [ -n "$VERSION_ID" ]; then
+            case "$OS" in
+                debian)
+                    case "$VERSION_ID" in
+                        12*) CODENAME="bookworm" ;;
+                        11*) CODENAME="bullseye" ;;
+                        10*) CODENAME="buster" ;;
+                    esac
+                    ;;
+                ubuntu)
+                    case "$VERSION_ID" in
+                        24.04*) CODENAME="noble" ;;
+                        22.04*) CODENAME="jammy" ;;
+                        20.04*) CODENAME="focal" ;;
+                        18.04*) CODENAME="bionic" ;;
+                    esac
+                    ;;
+            esac
+        fi
+
+        if [ -n "$OS" ] && [ -n "$CODENAME" ]; then
+            echo -e "${Green}检测到的操作系统：${OS}, 代号：${CODENAME}${Font}"
+        else
+            echo -e "${Red}无法确定操作系统或代号，脚本将退出.${Font}"
+            exit 1
+        fi
     else
         echo -e "${Red}无法检测操作系统类型，脚本将退出.${Font}"
         exit 1
@@ -75,42 +115,47 @@ detect_os() {
 set_cn_mirror() {
     echo "正在切换到中国科技大学 (USTC) 的镜像源..."
 
-    # 备份原有 sources.list
-    if [ ! -f /etc/apt/sources.list.bak ]; then
+    # 备份原有 sources.list（仅一次）
+    if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
         cp /etc/apt/sources.list /etc/apt/sources.list.bak
         echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
     else
-        echo -e "${Yellow}备份文件 /etc/apt/sources.list.bak 已存在，跳过备份步骤${Font}"
+        echo -e "${Yellow}备份文件已存在或 sources.list 不存在，跳过备份步骤${Font}"
     fi
 
-    # 注释掉原有的源
-    sed -i.bak '/^deb /s/^/#/' /etc/apt/sources.list
-
-    # 根据不同的操作系统添加相应的镜像源
+    # 根据不同的操作系统写入相应的镜像源（覆盖写入，避免文件无限增大）
     if [ "$OS" = "debian" ]; then
-        cat <<EOF >> /etc/apt/sources.list
-
-# 使用中国科技大学 (USTC) 的 Debian 镜像源
-deb https://mirrors.ustc.edu.cn/debian/ $CODENAME main contrib non-free non-free-firmware
-deb https://mirrors.ustc.edu.cn/debian/ $CODENAME-updates main contrib non-free non-free-firmware
-deb https://mirrors.ustc.edu.cn/debian/ $CODENAME-backports main contrib non-free non-free-firmware
-deb https://security.debian.org/debian-security $CODENAME-security main contrib non-free non-free-firmware
+        # Debian 12 之后支持 non-free-firmware
+        major=${VERSION_ID%%.*}
+        if [ -n "$major" ] && [ "$major" -ge 12 ]; then
+            comps="main contrib non-free non-free-firmware"
+            sec_sfx="${CODENAME}-security"
+        else
+            comps="main contrib non-free"
+            # Debian 10/更早使用 /updates
+            sec_sfx="${CODENAME}/updates"
+        fi
+        cat > /etc/apt/sources.list <<EOF
+# USTC Debian 镜像
+deb https://mirrors.ustc.edu.cn/debian/ ${CODENAME} ${comps}
+deb https://mirrors.ustc.edu.cn/debian/ ${CODENAME}-updates ${comps}
+deb https://mirrors.ustc.edu.cn/debian/ ${CODENAME}-backports ${comps}
+deb https://security.debian.org/debian-security ${sec_sfx} ${comps}
 EOF
     elif [ "$OS" = "ubuntu" ]; then
-        cat <<EOF >> /etc/apt/sources.list
-
-# 使用中国科技大学 (USTC) 的 Ubuntu 镜像源
-deb https://mirrors.ustc.edu.cn/ubuntu/ $CODENAME main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ $CODENAME-updates main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ $CODENAME-backports main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ $CODENAME-security main restricted universe multiverse
+        cat > /etc/apt/sources.list <<EOF
+# USTC Ubuntu 镜像
+deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME} main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-updates main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-backports main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-security main restricted universe multiverse
 EOF
     else
         echo -e "${Red}不支持的操作系统: $OS${Font}"
         exit 1
     fi
 
-    echo -e "${Green}成功添加中国科技大学 (USTC) 的镜像源，并保留了原有源的注释备份${Font}"
+    echo -e "${Green}已切换到 USTC 镜像源（覆盖写入），原文件已备份${Font}"
 }
 
 # 设置国际 APT 镜像源
@@ -120,26 +165,38 @@ set_international_mirror() {
 
 # 安装 Starship
 install_starship() {
-    echo "通过 curl 安装 Starship..."
-    sh -c "$(curl -sS https://starship.rs/install.sh)" || {
-        echo -e "${Yellow}Starship 安装失败，跳过此步骤，继续执行下一步。${Font}"
-        return 0  # 返回 0 以继续执行后续步骤
-    }
+    echo "安装 Starship..."
+    # 优先尝试 APT 包（部分新版本 Debian/Ubuntu 提供）
+    if apt-get install -y -qq starship >/dev/null 2>&1; then
+        echo -e "${Green}Starship 通过 APT 安装成功。版本：$(starship --version)${Font}"
+        return 0
+    fi
 
-    # 验证安装
-    if command -v starship >/dev/null 2>&1; then
-        echo -e "${Green}Starship 安装成功。版本：$(starship --version)${Font}"
+    # 回退到官方安装脚本（非交互）
+    if curl -fsSL https://starship.rs/install.sh | sh -s -- -y; then
+        if command -v starship >/dev/null 2>&1; then
+            echo -e "${Green}Starship 安装成功。版本：$(starship --version)${Font}"
+        else
+            echo -e "${Yellow}Starship 安装后未检测到可执行文件，但继续执行下一步。${Font}"
+        fi
     else
-        echo -e "${Yellow}Starship 安装失败，但继续执行下一步。${Font}"
-        return 0  # 即使验证失败，也继续执行后续步骤
+        echo -e "${Yellow}Starship 安装失败，跳过此步骤，继续执行下一步。${Font}"
     fi
 }
 
 # 配置 Starship
 configure_starship() {
     echo "配置 Starship..."
-    zshrc_file="/root/.zshrc"
+    zshrc_file="${ZDOTDIR:-$HOME}/.zshrc"
     starship_config='eval "$(starship init zsh)"'
+
+    touch "$zshrc_file"
+    # 关闭 oh-my-zsh 主题，避免与 starship 提示符冲突
+    if grep -q '^ZSH_THEME=' "$zshrc_file"; then
+        sed -i 's/^ZSH_THEME=.*/ZSH_THEME=""/' "$zshrc_file"
+    else
+        echo 'ZSH_THEME=""' >> "$zshrc_file"
+    fi
 
     if grep -qF "$starship_config" "$zshrc_file"; then
         echo -e "${Yellow}Starship 配置已存在于 .zshrc 中，跳过添加步骤。${Font}"
@@ -151,31 +208,64 @@ configure_starship() {
 
 # 安装 oh-my-zsh
 install_oh_my_zsh() {
-    echo "安装 oh my zsh..."
+    echo "安装 oh-my-zsh..."
+    export RUNZSH=no
+    export CHSH=no
+
+    # 已安装则跳过
+    if [ -d "$HOME/.oh-my-zsh" ]; then
+        echo -e "${Yellow}检测到 ~/.oh-my-zsh 已存在，跳过安装。${Font}"
+        return 0
+    fi
+
+    # 按地理位置选择优先源：在中国优先 Gitee，否则优先 GitHub
     if $isCN; then
-        # 使用 Gitee 的 oh-my-zsh 镜像
-        sh -c "$(wget https://gitee.com/mirrors/oh-my-zsh/raw/master/tools/install.sh -O -)" "" --unattended
+        if ! wget -qO- https://gitee.com/mirrors/oh-my-zsh/raw/master/tools/install.sh | sh -s -- --unattended; then
+            echo -e "${Yellow}通过 Gitee 安装 oh-my-zsh 失败，尝试 GitHub 源...${Font}"
+            curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | bash -s -- --unattended || true
+        fi
     else
-        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+        if ! curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | bash -s -- --unattended; then
+            echo -e "${Yellow}通过 GitHub 安装 oh-my-zsh 失败，尝试 Gitee 源...${Font}"
+            wget -qO- https://gitee.com/mirrors/oh-my-zsh/raw/master/tools/install.sh | sh -s -- --unattended || true
+        fi
     fi
 }
 
 # 修改 SSH 配置
 configure_ssh() {
-    echo "生成 SSH 密钥..."
-    ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa
-
     echo "配置 SSH 密钥登录..."
 
-    # 确保 authorized_keys 存在
-    touch ~/.ssh/authorized_keys
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
 
-    # 备份现有 authorized_keys
-    cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak
+    # 如果没有密钥则生成（优先 ed25519，不支持再退回 rsa）
+    if [ ! -f ~/.ssh/id_ed25519 ] && [ ! -f ~/.ssh/id_rsa ]; then
+        if ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 2>/dev/null; then
+            key_pub=~/.ssh/id_ed25519.pub
+        else
+            ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa
+            key_pub=~/.ssh/id_rsa.pub
+        fi
+    else
+        # 选择已有的公钥
+        if [ -f ~/.ssh/id_ed25519.pub ]; then
+            key_pub=~/.ssh/id_ed25519.pub
+        else
+            key_pub=~/.ssh/id_rsa.pub
+        fi
+    fi
+
+    # 确保 authorized_keys 存在并权限正确
+    touch ~/.ssh/authorized_keys
+    chmod 600 ~/.ssh/authorized_keys
+
+    # 备份现有 authorized_keys（一次）
+    [ ! -f ~/.ssh/authorized_keys.bak ] && cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak || true
 
     # 检查是否已经存在该公钥，避免重复添加
-    if ! grep -q -F "$(cat ~/.ssh/id_rsa.pub)" ~/.ssh/authorized_keys; then
-        cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+    if [ -f "$key_pub" ] && ! grep -q -F "$(cat "$key_pub")" ~/.ssh/authorized_keys; then
+        cat "$key_pub" >> ~/.ssh/authorized_keys
         echo "新的 SSH 公钥已添加到 authorized_keys。"
     else
         echo "SSH 公钥已存在于 authorized_keys 中，跳过添加。"
@@ -188,8 +278,14 @@ configure_ssh() {
         echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
     fi
 
-    systemctl restart ssh
+    # 如需仅允许密钥登录，可同时设置为：PasswordAuthentication no
+    # if grep -q "^PasswordAuthentication" /etc/ssh/sshd_config; then
+    #     sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+    # else
+    #     echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
+    # fi
 
+    systemctl restart ssh || systemctl restart sshd || true
     echo "SSH 配置已更新并重启 SSH 服务。"
 }
 
@@ -197,9 +293,23 @@ configure_ssh() {
 setup_swap() {
     echo "检查是否存在 Swap 分区..."
 
-    # 检查是否存在 Swap 分区
+    # 已有 swap 激活
     if swapon --show | grep -q "^/"; then
         echo -e "${Green}Swap 分区已存在，跳过 Swap 设置步骤.${Font}"
+        return
+    fi
+
+    # 如果存在 /swap 文件但未激活，尝试直接启用并确保写入 fstab
+    if [ -f /swap ]; then
+        chmod 600 /swap || true
+        mkswap /swap || true
+        swapon /swap || true
+        if ! grep -q '^/swap ' /etc/fstab; then
+            echo '/swap none swap defaults 0 0' >> /etc/fstab
+        fi
+        echo -e "${Green}/swap 已启用。${Font}"
+        swapon --show
+        free -h
         return
     fi
 
@@ -216,20 +326,17 @@ setup_swap() {
 
     echo "系统内存: ${mem_total}MB, 需要创建的 Swap 大小: ${swap_size}MB"
 
-    fallocate -l ${swap_size}M /swap
-    if [ $? -ne 0 ]; then
-        echo -e "${Red}fallocate 创建 Swap 文件失败，尝试使用 dd 命令...${Font}"
+    if ! fallocate -l ${swap_size}M /swap 2>/dev/null; then
+        echo -e "${Yellow}fallocate 创建 Swap 文件失败，尝试使用 dd 命令...${Font}"
         dd if=/dev/zero of=/swap bs=1M count=${swap_size}
-        if [ $? -ne 0 ]; then
-            echo -e "${Red}使用 dd 创建 Swap 文件失败，请检查磁盘空间或权限设置.${Font}"
-            exit 1
-        fi
     fi
 
     chmod 600 /swap
     mkswap /swap
     swapon /swap
-    echo '/swap none swap defaults 0 0' >> /etc/fstab
+    if ! grep -q '^/swap ' /etc/fstab; then
+        echo '/swap none swap defaults 0 0' >> /etc/fstab
+    fi
 
     echo -e "${Green}Swap 分区创建成功，并查看信息：${Font}"
     swapon --show
@@ -239,8 +346,7 @@ setup_swap() {
 # 开启 BBR
 enable_bbr() {
     echo "开启 BBR..."
-    uname -r
-    
+
     # 检查并添加 net.core.default_qdisc 配置
     if ! grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf; then
         echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
@@ -257,10 +363,10 @@ enable_bbr() {
         echo "net.ipv4.tcp_congestion_control=bbr 配置已存在，无需添加"
     fi
 
-    sysctl -p
+    sysctl -p >/dev/null || true
 
     # 检查 BBR 是否成功开启
-    if sysctl net.ipv4.tcp_available_congestion_control | grep -q bbr; then
+    if sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -q '^bbr$'; then
         echo -e "${Green}BBR 已成功开启！${Font}"
     else
         echo -e "${Red}BBR 开启失败，请检查您的系统是否支持 BBR。${Font}"
@@ -282,15 +388,15 @@ main() {
 
     # 更新软件包列表
     echo "更新软件包列表..."
-    apt update
+    apt-get update -y -o Acquire::Retries=3
 
     # 安装必备软件
     echo "安装必备软件..."
-    apt install -y git wget vim nano zsh curl tar zip unzip sudo
+    apt-get install -y git wget vim nano zsh curl tar zip unzip sudo ca-certificates
 
     # 设置 Zsh 为默认终端
     echo "设置 Zsh 为默认终端..."
-    chsh -s "$(which zsh)" || echo -e "${Yellow}更改默认 shell 失败，请手动执行 chsh 命令.${Font}"
+    chsh -s "$(command -v zsh)" || echo -e "${Yellow}更改默认 shell 失败，请手动执行 chsh 命令.${Font}"
 
     # 安装 oh-my-zsh
     install_oh_my_zsh
