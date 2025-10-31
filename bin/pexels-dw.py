@@ -5,7 +5,9 @@ Pexels 下载器（Python 版本）
 使用方法：
   1) 运行本脚本
   2) 粘贴/输入包含下载链接的 JSON 或文本（含 https 链接即可）
-  3) 按 Ctrl-D 结束输入并开始下载
+  3) 结束输入：
+     - macOS/Linux：按 Ctrl-D
+     - Windows（PowerShell/CMD）：按 Ctrl-Z 然后回车
 
 功能特性：
   - 从 STDIN 读取内容，智能提取所有 https:// 链接（解析 JSON 或正则扫描）
@@ -37,6 +39,31 @@ URL_RE = re.compile(r"https://[^\s\"'<>]+", re.IGNORECASE)
 
 
 def read_stdin_text() -> str:
+  # 交互式终端：逐行读取，兼容多种结束方式
+  # - Windows: 支持 Ctrl-Z（^Z）在任意位置出现（建议单独一行），随后回车
+  # - *nix: Ctrl-D 触发 EOFError
+  # - 仍保留可见的 EOF/END/. 作为备用方案
+  if sys.stdin.isatty():
+    lines: List[str] = []
+    sentinels = {"EOF", "END", ".", "结束", "退出"}
+    while True:
+      try:
+        line = input()
+      except EOFError:
+        # Ctrl-D（或 Windows 下 Ctrl-Z+回车 在行首）
+        break
+      # 处理 Windows 的 Ctrl-Z 字符（ASCII 26，显示为 ^Z）
+      if "\x1a" in line:
+        before, _sep, _after = line.partition("\x1a")
+        if before:
+          lines.append(before)
+        break
+      # 可见的备用结束标记
+      if line.strip() in sentinels:
+        break
+      lines.append(line)
+    return "\n".join(lines).strip()
+  # 非交互（管道/重定向）保持一次性读取
   data = sys.stdin.read()
   return data.strip()
 
@@ -232,7 +259,14 @@ def download_with_python(urls: List[str], outdir: Path, max_workers: int = 4) ->
 
 def main() -> int:
   if sys.stdin.isatty():
-    print("提示：从 STDIN 读取输入。请粘贴包含 https 链接的 JSON/文本后按 Ctrl-D 结束。\n")
+    eof_hint = ("Ctrl-Z 然后回车" if os.name == "nt" else "Ctrl-D")
+    print("提示：从 STDIN 读取输入。")
+    if os.name == "nt":
+      print("· Windows：按 Ctrl-Z 然后回车结束（最好在新的一行）。")
+      print("  若看到 ^Z 出现在行内，也会被自动识别为结束标记。")
+    else:
+      print("· macOS/Linux：按 Ctrl-D 结束。")
+    print("· 备用：也可在单独一行输入 EOF/END/. 结束\n")
   text = read_stdin_text()
   if not text:
     print("未读取到任何输入；请将包含 https 链接的 JSON/文本通过 STDIN 提供。")
