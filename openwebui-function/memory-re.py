@@ -173,7 +173,7 @@ class Filter:
 
         # 显示状态栏
         if self.valves.show_stats:
-            stats = self._calculate_stats(conversation_end_time)
+            stats = self._calculate_stats(conversation_end_time, body)
             await self._show_status(__event_emitter__, memory_result, stats)
 
         return body
@@ -443,12 +443,28 @@ class Filter:
         except Exception:
             return []
 
-    def _calculate_stats(self, end_time: float) -> Dict[str, str]:
+    def _calculate_stats(self, end_time: float, body: dict = None) -> Dict[str, str]:
         elapsed = end_time - self.start_time
         ttft = "N/A"
         if self.time_to_first_token is not None:
             ttft = f"{self.time_to_first_token:.2f}s"
-        return {"elapsed": f"{elapsed:.2f}s", "ttft": ttft}
+
+        # 计算吐字速度
+        speed = "N/A"
+        if body and self.time_to_first_token is not None:
+            messages = body.get("messages", [])
+            if messages:
+                # 获取最后一条 assistant 消息
+                last_msg = messages[-1]
+                if last_msg.get("role") == "assistant":
+                    content = last_msg.get("content", "")
+                    char_count = len(content)
+                    generation_time = elapsed - self.time_to_first_token
+                    if generation_time > 0:
+                        chars_per_sec = char_count / generation_time
+                        speed = f"{chars_per_sec:.0f} t/s"
+
+        return {"elapsed": f"{elapsed:.2f}s", "ttft": ttft, "speed": speed}
 
     async def _show_status(self, emitter: Any, memory_res: Dict[str, Any], stats: Dict[str, str]) -> None:
         """在 UI 上显示状态信息（带 emoji 美化）"""
@@ -459,11 +475,12 @@ class Filter:
             "skipped": "⏭️",
         }.get(memory_res.get("status", "skipped"), "📝")
 
-        # 构建美观的状态栏
+        # 构建美观的状态栏（emoji + 文字标签 + 分隔符）
         status_text = (
-            f"{status_emoji} {memory_res.get('message', '')}  "
-            f"⚡ {stats['ttft']}  "
-            f"⏱️ {stats['elapsed']}"
+            f"{status_emoji} 记忆: {memory_res.get('message', '')}  |  "
+            f"⚡ 首字: {stats['ttft']}  |  "
+            f"🚀 吐字: {stats['speed']}  |  "
+            f"⏱️ 耗时: {stats['elapsed']}"
         )
         await emitter({
             "type": "status",
