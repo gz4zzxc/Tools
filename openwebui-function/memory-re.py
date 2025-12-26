@@ -157,8 +157,8 @@ class Filter:
             # 启动清洗任务
             asyncio.create_task(self._run_retroactive_cleanup(user))
             memory_result = {
-                "status": "success", 
-                "message": "🧹 后台清洗任务已启动..."
+                "status": "success",
+                "message": "🧹 历史清洗已启动"
             }
         else:
             # 正常记忆处理
@@ -167,8 +167,8 @@ class Filter:
             except Exception as e:
                 print(f"[SuperMemory] Processing Error: {e}")
                 memory_result = {
-                    "status": "error", 
-                    "message": "处理异常"
+                    "status": "error",
+                    "message": "⚠️ 处理异常"
                 }
 
         # 显示状态栏
@@ -246,12 +246,12 @@ class Filter:
         # 1. 构建上下文
         context_str = self._build_context_string(body["messages"])
         if not context_str:
-            return {"status": "skipped", "message": "无有效上下文"}
+            return {"status": "skipped", "message": "🔍 无有效上下文"}
 
         # 2. 提取事实
         new_facts = await self._call_llm_json(FACT_EXTRACTION_PROMPT, context_str)
         if not new_facts:
-            return {"status": "success", "message": "无新事实"}
+            return {"status": "success", "message": "💨 无新事实"}
 
         saved_count = 0
         updated_count = 0
@@ -287,14 +287,14 @@ class Filter:
             # 触发摘要计数
             self._increment_counter_and_trigger_summary(user)
 
-        # 构建返回信息
+        # 构建返回信息（带 emoji 美化）
         msg_parts = []
         if saved_count:
-            msg_parts.append(f"新增{saved_count}")
+            msg_parts.append(f"✨ 新增 {saved_count}")
         if updated_count:
-            msg_parts.append(f"更新{updated_count}")
-            
-        final_message = ", ".join(msg_parts) if msg_parts else "无需记忆"
+            msg_parts.append(f"🔄 更新 {updated_count}")
+
+        final_message = " · ".join(msg_parts) if msg_parts else "💭 无需记忆"
         return {"status": "success", "message": final_message}
 
     # ==================== 辅助方法 ====================
@@ -451,9 +451,21 @@ class Filter:
         return {"elapsed": f"{elapsed:.2f}s", "ttft": ttft}
 
     async def _show_status(self, emitter: Any, memory_res: Dict[str, Any], stats: Dict[str, str]) -> None:
-        """在 UI 上显示状态信息"""
-        status_text = f"记忆: {memory_res.get('message', '')} | 首字: {stats['ttft']} | 耗时: {stats['elapsed']}"
+        """在 UI 上显示状态信息（带 emoji 美化）"""
+        # 根据状态选择不同的 emoji
+        status_emoji = {
+            "success": "🧠",
+            "error": "❌",
+            "skipped": "⏭️",
+        }.get(memory_res.get("status", "skipped"), "📝")
+
+        # 构建美观的状态栏
+        status_text = (
+            f"{status_emoji} {memory_res.get('message', '')}  "
+            f"⚡ {stats['ttft']}  "
+            f"⏱️ {stats['elapsed']}"
+        )
         await emitter({
-            "type": "status", 
+            "type": "status",
             "data": {"description": status_text, "done": True}
         })
