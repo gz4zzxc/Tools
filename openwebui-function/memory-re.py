@@ -102,6 +102,11 @@ class Filter:
             description="显示统计",
             json_schema_extra={"title": "📊 显示统计"}
         )
+        show_context_length: bool = Field(
+            default=True,
+            description="显示当前对话的上下文 Token 长度",
+            json_schema_extra={"title": "📏 显示上下文长度"}
+        )
         messages_to_consider: int = Field(
             default=2, 
             description="上下文窗口",
@@ -128,11 +133,19 @@ class Filter:
         self.start_time: float = 0.0
         self.time_to_first_token: Optional[float] = None
         self.first_chunk_received: bool = False
+        self.current_context_tokens: int = 0
 
     def inlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
         self.start_time = time.time()
         self.time_to_first_token = None
         self.first_chunk_received = False
+        
+        # 计算上下文 Token 数
+        if self.valves.show_context_length:
+            messages = body.get("messages", [])
+            model = body.get("model", self.valves.model)
+            self.current_context_tokens = self._count_tokens(messages, model)
+            
         return body
 
     def stream(self, event: dict) -> dict:
@@ -173,6 +186,12 @@ class Filter:
 
         # 显示状态栏
         if self.valves.show_stats:
+            # 重新计算最终的总上下文 Token (包含 AI 的回复)
+            if self.valves.show_context_length:
+                messages = body.get("messages", [])
+                model = body.get("model", self.valves.model)
+                self.current_context_tokens = self._count_tokens(messages, model)
+
             stats = self._calculate_stats(conversation_end_time, body)
             await self._show_status(__event_emitter__, memory_result, stats)
 
@@ -466,6 +485,45 @@ class Filter:
 
         return {"elapsed": f"{elapsed:.2f}s", "ttft": ttft, "speed": speed}
 
+    def _count_tokens(self, messages: List[dict], model: str) -> int:
+        """计算消息列表的 Token 总数"""
+        try:
+            import tiktoken
+        except ImportError:
+            return 0
+
+        try:
+            # 尝试获取模型对应的编码，如果失败则使用默认编码
+            try:
+                encoding = tiktoken.encoding_for_model(model)
+            except KeyError:
+                encoding = tiktoken.get_encoding("cl100k_base")
+
+            num_tokens = 0
+            for message in messages:
+                # 基础开销: <|im_start|>{role}\n{content}<|im_end|>\n
+                num_tokens += 3 
+                for key, value in message.items():
+                    if key == "content":
+                        if isinstance(value, str):
+                            num_tokens += len(encoding.encode(value))
+                        elif isinstance(value, list):
+                            # 处理多模态或复杂格式 (如 [{"type": "text", "text": "..."}])
+                            for item in value:
+                                if isinstance(item, dict) and "text" in item:
+                                    num_tokens += len(encoding.encode(item["text"]))
+                    elif key == "role":
+                        num_tokens += len(encoding.encode(value))
+                    elif key == "name":
+                        num_tokens += len(encoding.encode(value))
+                        num_tokens += 1 # 角色名额外开销
+            
+            num_tokens += 3  # 答复的引导开销
+            return num_tokens
+        except Exception as e:
+            print(f"[SuperMemory] Token Count Error: {e}")
+            return 0
+
     async def _show_status(self, emitter: Any, memory_res: Dict[str, Any], stats: Dict[str, str]) -> None:
         """在 UI 上显示状态信息（带 emoji 美化）"""
         # 根据状态选择不同的 emoji
@@ -475,13 +533,26 @@ class Filter:
             "skipped": "⏭️",
         }.get(memory_res.get("status", "skipped"), "📝")
 
-        # 构建美观的状态栏（emoji + 文字标签 + 分隔符）
-        status_text = (
-            f"{status_emoji} 记忆: {memory_res.get('message', '')}  |  "
-            f"⚡ 首字: {stats['ttft']}  |  "
-            f"🚀 吐字: {stats['speed']}  |  "
+        # 构建描述信息
+        status_parts = [f"{status_emoji} 记忆: {memory_res.get('message', '')}"]
+        
+        if self.valves.show_context_length:
+            tokens = self.current_context_tokens
+            if tokens >= 1000000:
+                formatted_tokens = f"{tokens / 1000000:.1f}M"
+            elif tokens >= 1000:
+                formatted_tokens = f"{tokens / 1000:.1f}K"
+            else:
+                formatted_tokens = str(tokens)
+            status_parts.append(f"📏 上下文: {formatted_tokens}")
+            
+        status_parts.extend([
+            f"⚡ 首字: {stats['ttft']}",
+            f"🚀 吐字: {stats['speed']}",
             f"⏱️ 耗时: {stats['elapsed']}"
-        )
+        ])
+
+        status_text = "  |  ".join(status_parts)
         await emitter({
             "type": "status",
             "data": {"description": status_text, "done": True}
