@@ -232,6 +232,72 @@ install_oh_my_zsh() {
     fi
 }
 
+# 安装并启用常用 zsh 插件
+install_zsh_plugins() {
+    echo "安装 zsh 插件..."
+
+    if [ ! -d "$HOME/.oh-my-zsh" ]; then
+        echo -e "${Yellow}未检测到 oh-my-zsh，跳过插件安装。${Font}"
+        return 0
+    fi
+
+    zsh_custom="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
+    plugins_dir="$zsh_custom/plugins"
+    zshrc_file="${ZDOTDIR:-$HOME}/.zshrc"
+
+    mkdir -p "$plugins_dir"
+
+    # zsh-autosuggestions
+    if [ -d "$plugins_dir/zsh-autosuggestions/.git" ]; then
+        echo -e "${Yellow}zsh-autosuggestions 已存在，跳过克隆。${Font}"
+    else
+        if $isCN; then
+            if ! git clone -q https://gitee.com/mirrors/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions"; then
+                echo -e "${Yellow}通过 Gitee 安装 zsh-autosuggestions 失败，尝试 GitHub 源...${Font}"
+                git clone -q https://github.com/zsh-users/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions" || true
+            fi
+        else
+            if ! git clone -q https://github.com/zsh-users/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions"; then
+                echo -e "${Yellow}通过 GitHub 安装 zsh-autosuggestions 失败，尝试 Gitee 源...${Font}"
+                git clone -q https://gitee.com/mirrors/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions" || true
+            fi
+        fi
+    fi
+
+    # zsh-syntax-highlighting
+    if [ -d "$plugins_dir/zsh-syntax-highlighting/.git" ]; then
+        echo -e "${Yellow}zsh-syntax-highlighting 已存在，跳过克隆。${Font}"
+    else
+        if $isCN; then
+            if ! git clone -q https://gitee.com/mirrors/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting"; then
+                echo -e "${Yellow}通过 Gitee 安装 zsh-syntax-highlighting 失败，尝试 GitHub 源...${Font}"
+                git clone -q https://github.com/zsh-users/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting" || true
+            fi
+        else
+            if ! git clone -q https://github.com/zsh-users/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting"; then
+                echo -e "${Yellow}通过 GitHub 安装 zsh-syntax-highlighting 失败，尝试 Gitee 源...${Font}"
+                git clone -q https://gitee.com/mirrors/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting" || true
+            fi
+        fi
+    fi
+
+    touch "$zshrc_file"
+
+    # 确保 plugins=() 包含这两个插件
+    if grep -qE '^plugins=\(' "$zshrc_file"; then
+        if ! grep -qE '^plugins=\([^)]*zsh-autosuggestions[^)]*\)' "$zshrc_file"; then
+            sed -i -E 's/^plugins=\(([^)]*)\)/plugins=(\1 zsh-autosuggestions)/' "$zshrc_file"
+        fi
+        if ! grep -qE '^plugins=\([^)]*zsh-syntax-highlighting[^)]*\)' "$zshrc_file"; then
+            sed -i -E 's/^plugins=\(([^)]*)\)/plugins=(\1 zsh-syntax-highlighting)/' "$zshrc_file"
+        fi
+    else
+        echo 'plugins=(git zsh-autosuggestions zsh-syntax-highlighting)' >> "$zshrc_file"
+    fi
+
+    echo -e "${Green}zsh 插件安装并配置完成。${Font}"
+}
+
 # 修改 SSH 配置
 configure_ssh() {
     echo "配置 SSH 密钥登录..."
@@ -400,6 +466,9 @@ main() {
 
     # 安装 oh-my-zsh
     install_oh_my_zsh
+
+    # 安装并启用 zsh 插件
+    install_zsh_plugins
 
     # 安装 Starship
     install_starship
