@@ -343,13 +343,46 @@ install_zsh_plugins() {
 
     touch "$zshrc_file"
 
-    # 确保 plugins=() 包含这两个插件
-    if grep -qE '^plugins=\(' "$zshrc_file"; then
-        if ! grep -qE '^plugins=\([^)]*zsh-autosuggestions[^)]*\)' "$zshrc_file"; then
-            sed -i -E 's/^plugins=\(([^)]*)\)/plugins=(\1 zsh-autosuggestions)/' "$zshrc_file"
+    # 确保 plugins=() 包含这两个插件，并保持幂等与格式稳定
+    if grep -qE '^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(' "$zshrc_file"; then
+        plugins_line=$(grep -m1 -E '^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(' "$zshrc_file")
+        plugins_raw=$(printf '%s\n' "$plugins_line" | sed -E 's/^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(([^)]*)\).*/\1/')
+
+        plugins_list=()
+        if [ -n "$plugins_raw" ]; then
+            read -r -a plugins_tokens <<< "$plugins_raw"
+            for plugin in "${plugins_tokens[@]}"; do
+                [ -z "$plugin" ] && continue
+                case " ${plugins_list[*]} " in
+                    *" $plugin "*) ;;
+                    *) plugins_list+=("$plugin") ;;
+                esac
+            done
         fi
-        if ! grep -qE '^plugins=\([^)]*zsh-syntax-highlighting[^)]*\)' "$zshrc_file"; then
-            sed -i -E 's/^plugins=\(([^)]*)\)/plugins=(\1 zsh-syntax-highlighting)/' "$zshrc_file"
+
+        for plugin in zsh-autosuggestions zsh-syntax-highlighting; do
+            case " ${plugins_list[*]} " in
+                *" $plugin "*) ;;
+                *) plugins_list+=("$plugin") ;;
+            esac
+        done
+
+        plugins_line_new="plugins=(${plugins_list[*]})"
+        tmp_zshrc=$(mktemp)
+        if awk -v new_line="$plugins_line_new" '
+            BEGIN { replaced=0 }
+            /^[[:space:]]*#/ { print; next }
+            !replaced && /^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(/ {
+                print new_line
+                replaced=1
+                next
+            }
+            { print }
+        ' "$zshrc_file" > "$tmp_zshrc"; then
+            mv "$tmp_zshrc" "$zshrc_file"
+        else
+            rm -f "$tmp_zshrc"
+            echo -e "${Yellow}更新 .zshrc 插件配置失败，保留原文件。${Font}"
         fi
     else
         echo 'plugins=(git zsh-autosuggestions zsh-syntax-highlighting)' >> "$zshrc_file"
