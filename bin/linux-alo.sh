@@ -15,6 +15,7 @@ Font="\033[0m"
 isCN=false
 OS=""
 CODENAME=""
+VERSION_ID=""
 
 # 检查是否为 root 用户
 check_root() {
@@ -111,37 +112,90 @@ detect_os() {
     fi
 }
 
+# 检查 Debian 版本是否受支持（仅支持 Debian 11+）
+check_supported_debian_version() {
+    if [ "$OS" != "debian" ]; then
+        return 0
+    fi
+
+    major=""
+    if [ -n "${VERSION_ID:-}" ]; then
+        major=${VERSION_ID%%.*}
+    fi
+
+    if [ -n "$major" ] && [ "$major" -ge 11 ] 2>/dev/null; then
+        return 0
+    fi
+
+    if [ -z "$major" ]; then
+        case "$CODENAME" in
+            bullseye|bookworm|trixie)
+                return 0
+                ;;
+        esac
+    fi
+
+    echo -e "${Red}不支持的 Debian 版本: ${VERSION_ID:-unknown}（代号: ${CODENAME:-unknown}）。仅支持 Debian 11 及以上版本（11/12/13+）。${Font}"
+    exit 1
+}
+
+# 使用 Deb822 写入 Debian 软件源配置
+write_debian_sources_deb822() {
+    mirror_base="$1"
+    security_base="$2"
+    sources_file="/etc/apt/sources.list.d/debian.sources"
+
+    # 备份旧配置（仅一次）
+    if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
+        cp /etc/apt/sources.list /etc/apt/sources.list.bak
+        echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
+    fi
+
+    if [ -f "$sources_file" ] && [ ! -f "${sources_file}.bak" ]; then
+        cp "$sources_file" "${sources_file}.bak"
+        echo -e "${Green}备份原有 debian.sources 至 ${sources_file}.bak${Font}"
+    fi
+
+    major=${VERSION_ID%%.*}
+    if [ -n "$major" ] && [ "$major" -ge 12 ] 2>/dev/null; then
+        comps="main contrib non-free non-free-firmware"
+    elif [ "$CODENAME" = "bullseye" ]; then
+        comps="main contrib non-free"
+    else
+        # VERSION_ID 缺失时，默认按新版本启用 non-free-firmware
+        comps="main contrib non-free non-free-firmware"
+    fi
+
+    cat > "$sources_file" <<EOF
+Types: deb
+URIs: ${mirror_base}
+Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-backports
+Components: ${comps}
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: ${security_base}
+Suites: ${CODENAME}-security
+Components: ${comps}
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+
+    # 避免与 Deb822 重复配置
+    cat > /etc/apt/sources.list <<'EOF'
+# This file is managed by linux-alo.sh.
+# Debian sources are configured in /etc/apt/sources.list.d/debian.sources.
+EOF
+}
+
 # 设置国内 APT 镜像源
 set_cn_mirror() {
     echo "正在切换到中国科技大学 (USTC) 的镜像源..."
 
-    # 备份原有 sources.list（仅一次）
-    if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
-        cp /etc/apt/sources.list /etc/apt/sources.list.bak
-        echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
-    else
-        echo -e "${Yellow}备份文件已存在或 sources.list 不存在，跳过备份步骤${Font}"
-    fi
-
     # 根据不同的操作系统写入相应的镜像源（覆盖写入，避免文件无限增大）
     if [ "$OS" = "debian" ]; then
-        # Debian 12 之后支持 non-free-firmware
-        major=${VERSION_ID%%.*}
-        if [ -n "$major" ] && [ "$major" -ge 12 ]; then
-            comps="main contrib non-free non-free-firmware"
-            sec_sfx="${CODENAME}-security"
-        else
-            comps="main contrib non-free"
-            # Debian 10/更早使用 /updates
-            sec_sfx="${CODENAME}/updates"
-        fi
-        cat > /etc/apt/sources.list <<EOF
-# USTC Debian 镜像
-deb https://mirrors.ustc.edu.cn/debian/ ${CODENAME} ${comps}
-deb https://mirrors.ustc.edu.cn/debian/ ${CODENAME}-updates ${comps}
-deb https://mirrors.ustc.edu.cn/debian/ ${CODENAME}-backports ${comps}
-deb https://security.debian.org/debian-security ${sec_sfx} ${comps}
-EOF
+        # 安全源固定使用 Debian 官方，主仓使用 USTC
+        write_debian_sources_deb822 "https://mirrors.ustc.edu.cn/debian" "https://security.debian.org/debian-security"
+        echo -e "${Green}Debian 已切换为 Deb822 源配置（主仓 USTC，安全仓官方）。${Font}"
     elif [ "$OS" = "ubuntu" ]; then
         cat > /etc/apt/sources.list <<EOF
 # USTC Ubuntu 镜像
@@ -160,7 +214,13 @@ EOF
 
 # 设置国际 APT 镜像源
 set_international_mirror() {
-    echo "保留默认的国际 Debian 镜像源..."
+    if [ "$OS" = "debian" ]; then
+        echo "正在切换到 Debian 官方 Deb822 源配置..."
+        write_debian_sources_deb822 "https://deb.debian.org/debian" "https://security.debian.org/debian-security"
+        echo -e "${Green}Debian 已切换为官方 Deb822 源配置。${Font}"
+    else
+        echo "保留默认的国际 Debian 镜像源..."
+    fi
 }
 
 # 安装 Starship
@@ -444,6 +504,7 @@ main() {
     check_root
     geo_check
     detect_os
+    check_supported_debian_version
 
     # 根据地理位置设置镜像源
     if $isCN; then
