@@ -2,7 +2,7 @@
 
 # 更安全的 Bash 选项
 set -Eeuo pipefail
-IFS=$'\n\t'
+IFS=$' \t\n'
 export DEBIAN_FRONTEND=noninteractive
 
 # 设置颜色变量
@@ -350,7 +350,7 @@ install_zsh_plugins() {
 
         plugins_list=()
         if [ -n "$plugins_raw" ]; then
-            read -r -a plugins_tokens <<< "$plugins_raw"
+            IFS=' ' read -r -a plugins_tokens <<< "$plugins_raw"
             for plugin in "${plugins_tokens[@]}"; do
                 [ -z "$plugin" ] && continue
                 case " ${plugins_list[*]} " in
@@ -367,7 +367,9 @@ install_zsh_plugins() {
             esac
         done
 
-        plugins_line_new="plugins=(${plugins_list[*]})"
+        plugins_joined=$(printf '%s ' "${plugins_list[@]}")
+        plugins_joined=${plugins_joined% }
+        plugins_line_new="plugins=(${plugins_joined})"
         tmp_zshrc=$(mktemp)
         if awk -v new_line="$plugins_line_new" '
             BEGIN { replaced=0 }
