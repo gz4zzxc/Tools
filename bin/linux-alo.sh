@@ -498,15 +498,25 @@ install_oh_my_zsh() {
 
     # 按地理位置选择优先源：在中国优先 Gitee，否则优先 GitHub
     if $isCN; then
-        if ! run_verified_script "$ohmyzsh_gitee_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITEE" "OHMYZSH_INSTALL_SHA256_GITEE" sh --unattended; then
-            echo -e "${Yellow}通过 Gitee 安装 oh-my-zsh 失败，尝试 GitHub 源...${Font}"
-            run_verified_script "$ohmyzsh_github_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITHUB" "OHMYZSH_INSTALL_SHA256_GITHUB" sh --unattended || true
+        if run_verified_script "$ohmyzsh_gitee_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITEE" "OHMYZSH_INSTALL_SHA256_GITEE" sh --unattended; then
+            return 0
         fi
+        echo -e "${Yellow}通过 Gitee 安装 oh-my-zsh 失败，尝试 GitHub 源...${Font}"
+        if run_verified_script "$ohmyzsh_github_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITHUB" "OHMYZSH_INSTALL_SHA256_GITHUB" sh --unattended; then
+            return 0
+        fi
+        echo -e "${Red}oh-my-zsh 安装失败（双源均不可用）${Font}"
+        return 1
     else
-        if ! run_verified_script "$ohmyzsh_github_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITHUB" "OHMYZSH_INSTALL_SHA256_GITHUB" sh --unattended; then
-            echo -e "${Yellow}通过 GitHub 安装 oh-my-zsh 失败，尝试 Gitee 源...${Font}"
-            run_verified_script "$ohmyzsh_gitee_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITEE" "OHMYZSH_INSTALL_SHA256_GITEE" sh --unattended || true
+        if run_verified_script "$ohmyzsh_github_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITHUB" "OHMYZSH_INSTALL_SHA256_GITHUB" sh --unattended; then
+            return 0
         fi
+        echo -e "${Yellow}通过 GitHub 安装 oh-my-zsh 失败，尝试 Gitee 源...${Font}"
+        if run_verified_script "$ohmyzsh_gitee_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITEE" "OHMYZSH_INSTALL_SHA256_GITEE" sh --unattended; then
+            return 0
+        fi
+        echo -e "${Red}oh-my-zsh 安装失败（双源均不可用）${Font}"
+        return 1
     fi
 }
 
