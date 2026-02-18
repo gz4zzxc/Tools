@@ -673,7 +673,7 @@ main() {
 
     # 更新软件包列表
     echo "更新软件包列表..."
-    apt-get update -y -o Acquire::Retries=3
+    apt-get update -o Acquire::Retries=3
 
     # 安装必备软件
     echo "安装必备软件..."
