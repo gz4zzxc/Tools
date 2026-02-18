@@ -311,6 +311,12 @@ set_cn_mirror() {
         write_debian_sources_deb822 "https://mirrors.ustc.edu.cn/debian" "https://security.debian.org/debian-security"
         echo -e "${Green}Debian 已切换为 Deb822 源配置（主仓 USTC，安全仓官方）。${Font}"
     elif [ "$OS" = "ubuntu" ]; then
+        # 备份原有配置（仅一次）
+        if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
+            cp /etc/apt/sources.list /etc/apt/sources.list.bak
+            echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
+        fi
+
         cat > /etc/apt/sources.list <<EOF
 # USTC Ubuntu 镜像
 deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME} main restricted universe multiverse
@@ -323,7 +329,7 @@ EOF
         exit 1
     fi
 
-    echo -e "${Green}已切换到 USTC 镜像源（覆盖写入），原文件已备份${Font}"
+    echo -e "${Green}已切换到 USTC 镜像源（覆盖写入）${Font}"
 }
 
 # 设置国际 APT 镜像源
