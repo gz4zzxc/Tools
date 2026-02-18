@@ -428,7 +428,7 @@ set_international_mirror() {
         # 检测是否使用 Deb822 格式（Ubuntu 24.04+）
         if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
             echo "正在切换到 Ubuntu 官方 Deb822 源配置..."
-            write_ubuntu_sources_deb822 "http://archive.ubuntu.com/ubuntu" "http://security.ubuntu.com/ubuntu"
+            write_ubuntu_sources_deb822 "https://archive.ubuntu.com/ubuntu" "https://security.ubuntu.com/ubuntu"
             echo -e "${Green}Ubuntu 已切换为官方 Deb822 源配置。${Font}"
         else
             echo "保留默认的国际 Ubuntu 镜像源..."
