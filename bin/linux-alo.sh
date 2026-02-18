@@ -17,6 +17,120 @@ OS=""
 CODENAME=""
 VERSION_ID=""
 
+# 内置默认哈希（可通过环境变量覆盖）
+STARSHIP_INSTALL_SHA256_DEFAULT="eb6f59c6d1fb193fa28d6fc33a546a0df59539bb90bc8a6e043bda1589549d26"
+OHMYZSH_INSTALL_SHA256_DEFAULT="ce0b7c94aa04d8c7a8137e45fe5c4744e3947871f785fd58117c480c1bf49352"
+STARSHIP_INSTALL_HASH_SOURCE_URL_DEFAULT="https://raw.githubusercontent.com/starship/starship/master/install/install.sh"
+OHMYZSH_INSTALL_HASH_SOURCE_URL_DEFAULT="https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh"
+
+STARSHIP_INSTALL_SHA256="${STARSHIP_INSTALL_SHA256:-$STARSHIP_INSTALL_SHA256_DEFAULT}"
+OHMYZSH_INSTALL_SHA256_GITHUB="${OHMYZSH_INSTALL_SHA256_GITHUB:-${OHMYZSH_INSTALL_SHA256:-$OHMYZSH_INSTALL_SHA256_DEFAULT}}"
+OHMYZSH_INSTALL_SHA256_GITEE="${OHMYZSH_INSTALL_SHA256_GITEE:-${OHMYZSH_INSTALL_SHA256:-$OHMYZSH_INSTALL_SHA256_DEFAULT}}"
+STARSHIP_INSTALL_HASH_SOURCE_URL="${STARSHIP_INSTALL_HASH_SOURCE_URL:-$STARSHIP_INSTALL_HASH_SOURCE_URL_DEFAULT}"
+OHMYZSH_INSTALL_HASH_SOURCE_URL="${OHMYZSH_INSTALL_HASH_SOURCE_URL:-$OHMYZSH_INSTALL_HASH_SOURCE_URL_DEFAULT}"
+
+# 计算文件 SHA256
+sha256_file() {
+    file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# 下载文件到本地
+download_file() {
+    url="$1"
+    dst="$2"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 2 --retry-delay 1 "$url" -o "$dst"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$dst" "$url"
+    else
+        return 1
+    fi
+}
+
+# 从远程参考文件计算 SHA256
+remote_sha256() {
+    src_url="$1"
+    tmp_ref=$(mktemp)
+
+    if ! download_file "$src_url" "$tmp_ref"; then
+        rm -f "$tmp_ref"
+        return 1
+    fi
+
+    if ! ref_sha256=$(sha256_file "$tmp_ref"); then
+        rm -f "$tmp_ref"
+        return 1
+    fi
+
+    rm -f "$tmp_ref"
+    printf '%s\n' "$ref_sha256"
+}
+
+# 下载目标脚本 + 获取远程参考哈希 + 校验 + 本地执行
+run_verified_script() {
+    script_url="$1"
+    hash_source_url="$2"
+    fallback_sha256="$3"
+    sha_var_name="$4"
+    interpreter="$5"
+    shift 5
+
+    tmp_script=$(mktemp)
+
+    if ! download_file "$script_url" "$tmp_script"; then
+        rm -f "$tmp_script"
+        echo -e "${Yellow}下载脚本失败: ${script_url}${Font}"
+        return 1
+    fi
+
+    if ! actual_sha256=$(sha256_file "$tmp_script"); then
+        rm -f "$tmp_script"
+        echo -e "${Red}无法计算 SHA256（缺少 sha256sum/shasum），拒绝执行: ${script_url}${Font}"
+        return 1
+    fi
+
+    expected_sha256=""
+    if [ -n "$hash_source_url" ]; then
+        expected_sha256=$(remote_sha256 "$hash_source_url" || true)
+    fi
+
+    if [ -z "$expected_sha256" ] && [ -n "$fallback_sha256" ]; then
+        expected_sha256="$fallback_sha256"
+        echo -e "${Yellow}无法获取远程参考哈希，使用内置哈希校验（${sha_var_name}）.${Font}"
+    fi
+
+    if [ -z "$expected_sha256" ]; then
+        rm -f "$tmp_script"
+        echo -e "${Red}无法获取可用哈希（远程与本地回退均不可用），拒绝执行: ${script_url}${Font}"
+        return 1
+    fi
+
+    if [ "$actual_sha256" != "$expected_sha256" ]; then
+        rm -f "$tmp_script"
+        echo -e "${Red}脚本 SHA256 校验失败: ${script_url}${Font}"
+        echo -e "${Yellow}期望: ${expected_sha256}${Font}"
+        echo -e "${Yellow}实际: ${actual_sha256}${Font}"
+        return 1
+    fi
+
+    chmod 700 "$tmp_script"
+    if "$interpreter" "$tmp_script" "$@"; then
+        rm -f "$tmp_script"
+        return 0
+    fi
+
+    rm -f "$tmp_script"
+    return 1
+}
+
 # 检查是否为 root 用户
 check_root() {
     if [ "$(id -u)" != "0" ]; then
@@ -233,7 +347,7 @@ install_starship() {
     fi
 
     # 回退到官方安装脚本（非交互）
-    if curl -fsSL https://starship.rs/install.sh | sh -s -- -y; then
+    if run_verified_script "https://starship.rs/install.sh" "$STARSHIP_INSTALL_HASH_SOURCE_URL" "$STARSHIP_INSTALL_SHA256" "STARSHIP_INSTALL_SHA256" sh -y; then
         if command -v starship >/dev/null 2>&1; then
             echo -e "${Green}Starship 安装成功。版本：$(starship --version)${Font}"
         else
@@ -272,6 +386,9 @@ install_oh_my_zsh() {
     export RUNZSH=no
     export CHSH=no
 
+    ohmyzsh_github_url="https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh"
+    ohmyzsh_gitee_url="https://gitee.com/mirrors/oh-my-zsh/raw/master/tools/install.sh"
+
     # 已安装则跳过
     if [ -d "$HOME/.oh-my-zsh" ]; then
         echo -e "${Yellow}检测到 ~/.oh-my-zsh 已存在，跳过安装。${Font}"
@@ -280,14 +397,14 @@ install_oh_my_zsh() {
 
     # 按地理位置选择优先源：在中国优先 Gitee，否则优先 GitHub
     if $isCN; then
-        if ! wget -qO- https://gitee.com/mirrors/oh-my-zsh/raw/master/tools/install.sh | sh -s -- --unattended; then
+        if ! run_verified_script "$ohmyzsh_gitee_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITEE" "OHMYZSH_INSTALL_SHA256_GITEE" sh --unattended; then
             echo -e "${Yellow}通过 Gitee 安装 oh-my-zsh 失败，尝试 GitHub 源...${Font}"
-            curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | bash -s -- --unattended || true
+            run_verified_script "$ohmyzsh_github_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITHUB" "OHMYZSH_INSTALL_SHA256_GITHUB" sh --unattended || true
         fi
     else
-        if ! curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | bash -s -- --unattended; then
+        if ! run_verified_script "$ohmyzsh_github_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITHUB" "OHMYZSH_INSTALL_SHA256_GITHUB" sh --unattended; then
             echo -e "${Yellow}通过 GitHub 安装 oh-my-zsh 失败，尝试 Gitee 源...${Font}"
-            wget -qO- https://gitee.com/mirrors/oh-my-zsh/raw/master/tools/install.sh | sh -s -- --unattended || true
+            run_verified_script "$ohmyzsh_gitee_url" "$OHMYZSH_INSTALL_HASH_SOURCE_URL" "$OHMYZSH_INSTALL_SHA256_GITEE" "OHMYZSH_INSTALL_SHA256_GITEE" sh --unattended || true
         fi
     fi
 }
