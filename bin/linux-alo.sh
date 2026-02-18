@@ -655,9 +655,30 @@ configure_ssh() {
             touch "$file_path"
         fi
 
-        if grep -Eq "^[[:space:]]*#?[[:space:]]*${key}[[:space:]]+" "$file_path"; then
-            sed -i -E "s|^[[:space:]]*#?[[:space:]]*${key}[[:space:]].*|${key} ${value}|" "$file_path"
+        local tmp_file
+        tmp_file=$(mktemp)
+        
+        if awk -v key="$key" -v value="$value" '
+            BEGIN { replaced = 0; in_match = 0 }
+            /^[[:space:]]*(Match|Match[[:space:]])/ {
+                in_match = 1
+                print
+                next
+            }
+            /^[[:space:]]*$/ || /^[[:space:]]*#/ {
+                print
+                next
+            }
+            !in_match && !replaced && $0 ~ "^[[:space:]]*#?[[:space:]]*" key "[[:space:]]+" {
+                print key " " value
+                replaced = 1
+                next
+            }
+            { print }
+        ' "$file_path" > "$tmp_file"; then
+            mv "$tmp_file" "$file_path"
         else
+            rm -f "$tmp_file"
             printf '%s %s\n' "$key" "$value" >> "$file_path"
         fi
     }
