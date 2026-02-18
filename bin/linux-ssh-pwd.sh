@@ -25,12 +25,29 @@ fi
 
 # 重启 SSH 服务
 echo "重启 SSH 服务..."
-systemctl restart sshd
+SSH_SERVICE=""
 
-# 检查 systemctl 命令是否执行成功
-if [ $? -ne 0 ]; then
+# 先优先选择当前正在运行的服务名，再回退到已安装的服务名
+if systemctl is-active --quiet sshd; then
+  SSH_SERVICE="sshd"
+elif systemctl is-active --quiet ssh; then
+  SSH_SERVICE="ssh"
+elif systemctl list-unit-files sshd.service --no-legend 2>/dev/null | grep -q '^sshd\.service'; then
+  SSH_SERVICE="sshd"
+elif systemctl list-unit-files ssh.service --no-legend 2>/dev/null | grep -q '^ssh\.service'; then
+  SSH_SERVICE="ssh"
+else
+  echo "错误：未检测到 SSH 服务（sshd 或 ssh）。"
+  exit 1
+fi
+
+echo "检测到 SSH 服务名：${SSH_SERVICE}"
+
+if ! systemctl restart "${SSH_SERVICE}"; then
   echo "错误：重启 SSH 服务失败！"
   exit 1
 fi
+
+echo "已重启 SSH 服务：${SSH_SERVICE}"
 
 echo "SSH 配置已更新，密码登录已禁用。"
