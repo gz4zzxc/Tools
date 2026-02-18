@@ -708,8 +708,14 @@ main() {
 
     echo "所有操作完成，请检查配置是否正确。"   
 
-    # 提示用户下载私钥
-    echo "请将 ~/.ssh/id_rsa 私钥下载到客户端以使用密钥登录。"
+    # 提示用户下载实际存在的私钥
+    if [ -f "$HOME/.ssh/id_ed25519" ]; then
+        echo "请将 ~/.ssh/id_ed25519 私钥下载到客户端以使用密钥登录。"
+    elif [ -f "$HOME/.ssh/id_rsa" ]; then
+        echo "请将 ~/.ssh/id_rsa 私钥下载到客户端以使用密钥登录。"
+    else
+        echo -e "${Yellow}未找到可下载的 SSH 私钥（~/.ssh/id_ed25519 或 ~/.ssh/id_rsa），请手动检查。${Font}"
+    fi
 }
 
 main
