@@ -668,27 +668,30 @@ configure_ssh() {
         local tmp_file
         tmp_file=$(mktemp)
         
-        if awk -v key="$key" -v value="$value" '
-            BEGIN { replaced = 0; in_match = 0 }
-            /^[[:space:]]*(Match|Match[[:space:]])/ {
-                in_match = 1
-                print
-                next
-            }
-            /^[[:space:]]*$/ || /^[[:space:]]*#/ {
-                print
-                next
-            }
-            !in_match && !replaced && $0 ~ "^[[:space:]]*#?[[:space:]]*" key "[[:space:]]+" {
-                print key " " value
-                replaced = 1
-                next
-            }
-            { print }
-        ' "$file_path" > "$tmp_file"; then
-            mv "$tmp_file" "$file_path"
-        else
-            rm -f "$tmp_file"
+        local replaced=0
+        local in_match=0
+        
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [[ "$line" =~ ^[[:space:]]*(Match|Match[[:space:]]) ]]; then
+                in_match=1
+                printf '%s\n' "$line"
+                continue
+            fi
+            
+            if [ "$in_match" -eq 0 ] && [ "$replaced" -eq 0 ]; then
+                if [[ "$line" =~ ^[[:space:]]*#?[[:space:]]*${key}[[:space:]]+ ]]; then
+                    printf '%s %s\n' "$key" "$value"
+                    replaced=1
+                    continue
+                fi
+            fi
+            
+            printf '%s\n' "$line"
+        done < "$file_path" > "$tmp_file"
+        
+        mv "$tmp_file" "$file_path"
+        
+        if [ "$replaced" -eq 0 ]; then
             printf '%s %s\n' "$key" "$value" >> "$file_path"
         fi
     }
