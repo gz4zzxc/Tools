@@ -561,33 +561,27 @@ install_zsh_plugins() {
 
     touch "$zshrc_file"
 
-    # 确保 plugins=() 包含这两个插件，并保持幂等与格式稳定
+    # 只将实际存在的插件添加到配置
+    plugins_list=()
+
+    # git 是 oh-my-zsh 内置插件，始终可用
+    plugins_list+=("git")
+
+    # 只添加实际存在的插件
+    if [ -d "$plugins_dir/zsh-autosuggestions" ]; then
+        plugins_list+=("zsh-autosuggestions")
+    fi
+
+    if [ -d "$plugins_dir/zsh-syntax-highlighting" ]; then
+        plugins_list+=("zsh-syntax-highlighting")
+    fi
+
+    plugins_joined=$(printf '%s ' "${plugins_list[@]}")
+    plugins_joined=${plugins_joined% }
+    plugins_line_new="plugins=(${plugins_joined})"
+
+    # 确保 plugins=() 包含已安装的插件，并保持幂等与格式稳定
     if grep -qE '^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(' "$zshrc_file"; then
-        plugins_line=$(grep -m1 -E '^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(' "$zshrc_file")
-        plugins_raw=$(printf '%s\n' "$plugins_line" | sed -E 's/^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(([^)]*)\).*/\1/')
-
-        plugins_list=()
-        if [ -n "$plugins_raw" ]; then
-            IFS=' ' read -r -a plugins_tokens <<< "$plugins_raw"
-            for plugin in "${plugins_tokens[@]}"; do
-                [ -z "$plugin" ] && continue
-                case " ${plugins_list[*]} " in
-                    *" $plugin "*) ;;
-                    *) plugins_list+=("$plugin") ;;
-                esac
-            done
-        fi
-
-        for plugin in zsh-autosuggestions zsh-syntax-highlighting; do
-            case " ${plugins_list[*]} " in
-                *" $plugin "*) ;;
-                *) plugins_list+=("$plugin") ;;
-            esac
-        done
-
-        plugins_joined=$(printf '%s ' "${plugins_list[@]}")
-        plugins_joined=${plugins_joined% }
-        plugins_line_new="plugins=(${plugins_joined})"
         tmp_zshrc=$(mktemp)
         if awk -v new_line="$plugins_line_new" '
             BEGIN { replaced=0 }
@@ -605,7 +599,7 @@ install_zsh_plugins() {
             echo -e "${Yellow}更新 .zshrc 插件配置失败，保留原文件。${Font}"
         fi
     else
-        echo 'plugins=(git zsh-autosuggestions zsh-syntax-highlighting)' >> "$zshrc_file"
+        echo "$plugins_line_new" >> "$zshrc_file"
     fi
 
     echo -e "${Green}zsh 插件安装并配置完成。${Font}"
