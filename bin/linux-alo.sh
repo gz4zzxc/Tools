@@ -722,12 +722,18 @@ setup_swap() {
 
     # 如果存在 /swap 文件但未激活，尝试直接启用并确保写入 fstab
     if [ -f /swap ]; then
-        chmod 600 /swap || true
-        mkswap /swap || true
-        swapon /swap || true
+        chmod 600 /swap || { echo -e "${Red}权限设置失败${Font}"; return 1; }
+        
+        if ! file /swap | grep -q "swap file"; then
+            mkswap /swap || { echo -e "${Red}mkswap 失败${Font}"; return 1; }
+        fi
+        
+        swapon /swap || { echo -e "${Red}swapon 失败${Font}"; return 1; }
+        
         if ! grep -q '^/swap ' /etc/fstab; then
             echo '/swap none swap defaults 0 0' >> /etc/fstab
         fi
+        
         echo -e "${Green}/swap 已启用。${Font}"
         swapon --show
         free -h
