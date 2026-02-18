@@ -597,10 +597,27 @@ configure_ssh() {
     fi
 
     echo "修改 SSH 配置..."
-    if grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then
-        sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-    else
-        echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+
+    set_sshd_option() {
+        local file_path="$1"
+        local key="$2"
+        local value="$3"
+
+        if [ ! -f "$file_path" ]; then
+            touch "$file_path"
+        fi
+
+        if grep -Eq "^[[:space:]]*#?[[:space:]]*${key}[[:space:]]+" "$file_path"; then
+            sed -i -E "s|^[[:space:]]*#?[[:space:]]*${key}[[:space:]].*|${key} ${value}|" "$file_path"
+        else
+            printf '%s %s\n' "$key" "$value" >> "$file_path"
+        fi
+    }
+
+    set_sshd_option /etc/ssh/sshd_config PermitRootLogin yes
+
+    if [ -d /etc/ssh/sshd_config.d ]; then
+        set_sshd_option /etc/ssh/sshd_config.d/99-linux-alo.conf PermitRootLogin yes
     fi
 
     # 如需仅允许密钥登录，可同时设置为：PasswordAuthentication no
@@ -610,7 +627,32 @@ configure_ssh() {
     #     echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
     # fi
 
-    systemctl restart ssh || systemctl restart sshd || true
+    echo "验证 SSH 配置..."
+    if ! sshd -t; then
+        echo -e "${Red}SSH 配置语法验证失败，请检查 /etc/ssh/sshd_config 与 /etc/ssh/sshd_config.d/*.conf.${Font}" >&2
+        exit 1
+    fi
+
+    local SSH_SERVICE=""
+    if systemctl is-active --quiet sshd; then
+        SSH_SERVICE="sshd"
+    elif systemctl is-active --quiet ssh; then
+        SSH_SERVICE="ssh"
+    elif systemctl list-unit-files sshd.service --no-legend 2>/dev/null | grep -q '^sshd\.service'; then
+        SSH_SERVICE="sshd"
+    elif systemctl list-unit-files ssh.service --no-legend 2>/dev/null | grep -q '^ssh\.service'; then
+        SSH_SERVICE="ssh"
+    else
+        echo -e "${Red}未检测到 SSH 服务（sshd 或 ssh），无法重启。${Font}" >&2
+        exit 1
+    fi
+
+    echo "检测到 SSH 服务名：${SSH_SERVICE}"
+    if ! systemctl restart "${SSH_SERVICE}"; then
+        echo -e "${Red}SSH 服务重启失败：${SSH_SERVICE}${Font}" >&2
+        exit 1
+    fi
+
     echo "SSH 配置已更新并重启 SSH 服务。"
 }
 
