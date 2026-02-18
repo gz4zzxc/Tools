@@ -755,12 +755,17 @@ setup_swap() {
 
     if ! fallocate -l ${swap_size}M /swap 2>/dev/null; then
         echo -e "${Yellow}fallocate 创建 Swap 文件失败，尝试使用 dd 命令...${Font}"
-        dd if=/dev/zero of=/swap bs=1M count=${swap_size}
+        if ! dd if=/dev/zero of=/swap bs=1M count=${swap_size} 2>/dev/null; then
+            echo -e "${Red}dd 创建 Swap 文件失败${Font}"
+            rm -f /swap
+            return 1
+        fi
     fi
 
-    chmod 600 /swap
-    mkswap /swap
-    swapon /swap
+    chmod 600 /swap || { echo -e "${Red}权限设置失败${Font}"; rm -f /swap; return 1; }
+    mkswap /swap || { echo -e "${Red}mkswap 失败${Font}"; rm -f /swap; return 1; }
+    swapon /swap || { echo -e "${Red}swapon 失败${Font}"; rm -f /swap; return 1; }
+    
     if ! grep -q '^/swap ' /etc/fstab; then
         echo '/swap none swap defaults 0 0' >> /etc/fstab
     fi
