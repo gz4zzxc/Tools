@@ -140,6 +140,47 @@ check_root() {
 }
 
 # 检测服务器是否位于中国
+fetch_geo_trace() {
+    local url="$1"
+    local ua="$2"
+    local ip_mode="${GEO_CURL_IP_VERSION:-auto}"
+    local response=""
+    local -a modes
+
+    case "$ip_mode" in
+        4)
+            modes=("-4")
+            ;;
+        6)
+            modes=("-6")
+            ;;
+        auto|"")
+            # 默认先走 curl 自动协商；失败后回退到 IPv6 / IPv4 强制模式
+            modes=("" "-6" "-4")
+            ;;
+        *)
+            # 非法配置按 auto 处理，避免脚本中断
+            modes=("" "-6" "-4")
+            ;;
+    esac
+
+    for mode in "${modes[@]}"; do
+        if [ -n "$mode" ]; then
+            if response=$(curl "$mode" -fSL -A "$ua" -m 8 -s "$url" 2>/dev/null); then
+                printf '%s\n' "$response"
+                return 0
+            fi
+        else
+            if response=$(curl -fSL -A "$ua" -m 8 -s "$url" 2>/dev/null); then
+                printf '%s\n' "$response"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
 geo_check() {
     echo "检测服务器地理位置..."
     api_list=(
@@ -151,7 +192,7 @@ geo_check() {
     success=0
 
     for url in "${api_list[@]}"; do
-        if ! response=$(curl -4 -fSL -A "$ua" -m 8 -s "$url" 2>/dev/null); then
+        if ! response=$(fetch_geo_trace "$url" "$ua"); then
             echo -e "${Yellow}无法访问 ${url}，尝试下一个 API...${Font}"
             continue
         fi
