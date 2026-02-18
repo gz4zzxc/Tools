@@ -342,6 +342,44 @@ EOF
 EOF
 }
 
+# 使用 Deb822 写入 Ubuntu 软件源配置
+write_ubuntu_sources_deb822() {
+    mirror_base="$1"
+    security_base="$2"
+    sources_file="/etc/apt/sources.list.d/ubuntu.sources"
+
+    # 备份旧配置（仅一次）
+    if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
+        cp /etc/apt/sources.list /etc/apt/sources.list.bak
+        echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
+    fi
+
+    if [ -f "$sources_file" ] && [ ! -f "${sources_file}.bak" ]; then
+        cp "$sources_file" "${sources_file}.bak"
+        echo -e "${Green}备份原有 ubuntu.sources 至 ${sources_file}.bak${Font}"
+    fi
+
+    cat > "$sources_file" <<EOF
+Types: deb
+URIs: ${mirror_base}
+Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: ${security_base}
+Suites: ${CODENAME}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+
+    # 避免与 Deb822 重复配置
+    cat > /etc/apt/sources.list <<'EOF'
+# This file is managed by linux-alo.sh.
+# Ubuntu sources are configured in /etc/apt/sources.list.d/ubuntu.sources.
+EOF
+}
+
 # 设置国内 APT 镜像源
 set_cn_mirror() {
     echo "正在切换到中国科技大学 (USTC) 的镜像源..."
@@ -352,19 +390,26 @@ set_cn_mirror() {
         write_debian_sources_deb822 "https://mirrors.ustc.edu.cn/debian" "https://security.debian.org/debian-security"
         echo -e "${Green}Debian 已切换为 Deb822 源配置（主仓 USTC，安全仓官方）。${Font}"
     elif [ "$OS" = "ubuntu" ]; then
-        # 备份原有配置（仅一次）
-        if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
-            cp /etc/apt/sources.list /etc/apt/sources.list.bak
-            echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
-        fi
+        # 检测是否使用 Deb822 格式（Ubuntu 24.04+）
+        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            # 使用 Deb822 格式
+            write_ubuntu_sources_deb822 "https://mirrors.ustc.edu.cn/ubuntu" "https://mirrors.ustc.edu.cn/ubuntu"
+            echo -e "${Green}Ubuntu 已切换为 Deb822 源配置（USTC 镜像）。${Font}"
+        else
+            # 传统格式（旧版本 Ubuntu）
+            if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
+                cp /etc/apt/sources.list /etc/apt/sources.list.bak
+                echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
+            fi
 
-        cat > /etc/apt/sources.list <<EOF
+            cat > /etc/apt/sources.list <<EOF
 # USTC Ubuntu 镜像
 deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME} main restricted universe multiverse
 deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-updates main restricted universe multiverse
 deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-backports main restricted universe multiverse
 deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-security main restricted universe multiverse
 EOF
+        fi
     else
         echo -e "${Red}不支持的操作系统: $OS${Font}"
         exit 1
@@ -379,8 +424,17 @@ set_international_mirror() {
         echo "正在切换到 Debian 官方 Deb822 源配置..."
         write_debian_sources_deb822 "https://deb.debian.org/debian" "https://security.debian.org/debian-security"
         echo -e "${Green}Debian 已切换为官方 Deb822 源配置。${Font}"
+    elif [ "$OS" = "ubuntu" ]; then
+        # 检测是否使用 Deb822 格式（Ubuntu 24.04+）
+        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            echo "正在切换到 Ubuntu 官方 Deb822 源配置..."
+            write_ubuntu_sources_deb822 "http://archive.ubuntu.com/ubuntu" "http://security.ubuntu.com/ubuntu"
+            echo -e "${Green}Ubuntu 已切换为官方 Deb822 源配置。${Font}"
+        else
+            echo "保留默认的国际 Ubuntu 镜像源..."
+        fi
     else
-        echo "保留默认的国际 Debian 镜像源..."
+        echo "保留默认的国际镜像源..."
     fi
 }
 
