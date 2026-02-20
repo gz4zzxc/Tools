@@ -811,7 +811,7 @@ enable_bbr() {
     touch /etc/sysctl.conf
 
     # 检查并添加 net.core.default_qdisc 配置
-    if ! grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null; then
+    if ! grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf; then
         echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
         echo "已添加 net.core.default_qdisc=fq 配置"
     else
@@ -819,7 +819,7 @@ enable_bbr() {
     fi
 
     # 检查并添加 net.ipv4.tcp_congestion_control 配置
-    if ! grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
+    if ! grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
         echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
         echo "已添加 net.ipv4.tcp_congestion_control=bbr 配置"
     else
