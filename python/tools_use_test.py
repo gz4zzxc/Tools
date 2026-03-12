@@ -48,7 +48,11 @@ def get_model_parameters() -> Dict[str, str]:
         print(f"⚠️  不支持的选项: {api_choice}，将使用 1) openai")
         api_format = "openai"
 
-    default_base_url = "http://localhost:8000/v1" if api_format == "openai" else "http://localhost:8000"
+    default_base_url = (
+        "http://localhost:8000/v1"
+        if api_format == "openai"
+        else "http://localhost:8000"
+    )
     base_url = get_user_input("请输入 base_url", default_base_url)
     api_key = get_user_input("请输入 api_key", "sk-xxx")
     model_name = get_user_input("请输入模型名称", "deepseek-ai/DeepSeek-V3.1")
@@ -57,7 +61,7 @@ def get_model_parameters() -> Dict[str, str]:
         "api_format": api_format,
         "base_url": base_url,
         "api_key": api_key,
-        "model_name": model_name
+        "model_name": model_name,
     }
     if api_format == "anthropic":
         params["anthropic_version"] = "2023-06-01"
@@ -98,17 +102,14 @@ def get_tool_definitions() -> list[Dict[str, Any]]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "城市名称"
-                    },
+                    "city": {"type": "string", "description": "城市名称"},
                     "date": {
                         "type": "string",
-                        "description": "日期，格式为 YYYY-MM-DD"
-                    }
+                        "description": "日期，格式为 YYYY-MM-DD",
+                    },
                 },
-                "required": ["city"]
-            }
+                "required": ["city"],
+            },
         },
         {
             "name": "calculate",
@@ -118,12 +119,12 @@ def get_tool_definitions() -> list[Dict[str, Any]]:
                 "properties": {
                     "expression": {
                         "type": "string",
-                        "description": "数学表达式，如 2+3*4"
+                        "description": "数学表达式，如 2+3*4",
                     }
                 },
-                "required": ["expression"]
-            }
-        }
+                "required": ["expression"],
+            },
+        },
     ]
 
 
@@ -137,8 +138,8 @@ def create_test_tools_openai() -> list[ChatCompletionToolParam]:
                 "function": {
                     "name": tool["name"],
                     "description": tool["description"],
-                    "parameters": tool["parameters"]
-                }
+                    "parameters": tool["parameters"],
+                },
             }
         )
     return tools
@@ -152,7 +153,7 @@ def create_test_tools_anthropic() -> list[Dict[str, Any]]:
             {
                 "name": tool["name"],
                 "description": tool["description"],
-                "input_schema": tool["parameters"]
+                "input_schema": tool["parameters"],
             }
         )
     return tools
@@ -168,7 +169,9 @@ def normalize_anthropic_messages_url(base_url: str) -> str:
     return f"{cleaned}/v1/messages"
 
 
-def create_anthropic_headers(api_key: str, anthropic_version: str, stream: bool = False) -> Dict[str, str]:
+def create_anthropic_headers(
+    api_key: str, anthropic_version: str, stream: bool = False
+) -> Dict[str, str]:
     """创建 Anthropic 请求头"""
     headers = {
         "content-type": "application/json",
@@ -180,13 +183,17 @@ def create_anthropic_headers(api_key: str, anthropic_version: str, stream: bool 
     return headers
 
 
-def anthropic_messages_create(params: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
+def anthropic_messages_create(
+    params: Dict[str, str], payload: Dict[str, Any]
+) -> Dict[str, Any]:
     """调用 Anthropic messages 接口（非流式）"""
     url = normalize_anthropic_messages_url(params["base_url"])
     req = Request(
         url=url,
         data=json.dumps(payload).encode("utf-8"),
-        headers=create_anthropic_headers(params["api_key"], params["anthropic_version"]),
+        headers=create_anthropic_headers(
+            params["api_key"], params["anthropic_version"]
+        ),
         method="POST",
     )
     try:
@@ -207,7 +214,9 @@ def anthropic_stream_events(params: Dict[str, str], payload: Dict[str, Any]):
     req = Request(
         url=url,
         data=json.dumps(stream_payload).encode("utf-8"),
-        headers=create_anthropic_headers(params["api_key"], params["anthropic_version"], stream=True),
+        headers=create_anthropic_headers(
+            params["api_key"], params["anthropic_version"], stream=True
+        ),
         method="POST",
     )
     try:
@@ -229,7 +238,7 @@ def anthropic_stream_events(params: Dict[str, str], payload: Dict[str, Any]):
                     yield event
                     continue
                 if line.startswith("data:"):
-                    data_lines.append(line[len("data:"):].strip())
+                    data_lines.append(line[len("data:") :].strip())
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {e.code}: {error_body}") from e
@@ -258,7 +267,9 @@ def get_anthropic_output_tokens(response: Dict[str, Any]) -> Optional[int]:
         return None
 
 
-def normalize_anthropic_tool_calls(content_blocks: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+def normalize_anthropic_tool_calls(
+    content_blocks: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
     """规范化工具调用，兼容部分网关把 name/input 拆成多个 block 的情况"""
     normalized: list[Dict[str, Any]] = []
     for block in content_blocks:
@@ -279,7 +290,11 @@ def normalize_anthropic_tool_calls(content_blocks: list[Dict[str, Any]]) -> list
             continue
 
         prev_input = normalized[-1].get("input")
-        if isinstance(prev_input, dict) and prev_input.get("raw_arguments", "") == "" and len(prev_input) == 1:
+        if (
+            isinstance(prev_input, dict)
+            and prev_input.get("raw_arguments", "") == ""
+            and len(prev_input) == 1
+        ):
             normalized[-1]["input"] = input_payload
         elif isinstance(prev_input, dict):
             prev_input.update(input_payload)
@@ -305,7 +320,9 @@ def anthropic_messages_create_with_tool_choice_fallback(
         return anthropic_messages_create(params, fallback_payload)
 
 
-def anthropic_stream_events_with_tool_choice_fallback(params: Dict[str, str], payload: Dict[str, Any]):
+def anthropic_stream_events_with_tool_choice_fallback(
+    params: Dict[str, str], payload: Dict[str, Any]
+):
     """带 tool_choice 兼容降级的 Anthropic 流式请求"""
     try:
         yield from anthropic_stream_events(params, payload)
@@ -347,7 +364,7 @@ def test_basic_chat(client: OpenAI, model_name: str) -> bool:
         response = client.chat.completions.create(
             model=model_name,
             messages=[{"role": "user", "content": "你好，请简单介绍一下你自己"}],
-            max_tokens=100
+            max_tokens=100,
         )
         end_ts = time.perf_counter()
         ttft_ms = max((end_ts - start_ts) * 1000.0, 0.0)
@@ -359,7 +376,10 @@ def test_basic_chat(client: OpenAI, model_name: str) -> bool:
         # 统计输出 tokens 与速率
         completion_tokens = None
         try:
-            if getattr(response, "usage", None) and getattr(response.usage, "completion_tokens", None) is not None:
+            if (
+                getattr(response, "usage", None)
+                and getattr(response.usage, "completion_tokens", None) is not None
+            ):
                 completion_tokens = int(response.usage.completion_tokens)
         except Exception:
             completion_tokens = None
@@ -369,14 +389,18 @@ def test_basic_chat(client: OpenAI, model_name: str) -> bool:
 
         total_s = max(end_ts - start_ts, 1e-9)
         tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
-        print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+        print(
+            f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+        )
         return True
     except Exception as e:
         print(f"❌ 基本聊天功能失败: {e}")
         return False
 
 
-def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletionToolParam]) -> bool:
+def test_tools_usage(
+    client: OpenAI, model_name: str, tools: list[ChatCompletionToolParam]
+) -> bool:
     """测试工具使用功能"""
     print("\n=== 测试工具使用功能 ===")
     try:
@@ -386,11 +410,11 @@ def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletion
             messages=[{"role": "user", "content": "请帮我查询北京的天气"}],
             tools=tools,
             tool_choice="auto",
-            max_tokens=200
+            max_tokens=200,
         )
         end_ts = time.perf_counter()
         ttft_ms = max((end_ts - start_ts) * 1000.0, 0.0)
-        
+
         message = response.choices[0].message
         if message.tool_calls:
             print("✅ 模型支持工具调用！")
@@ -401,7 +425,10 @@ def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletion
             # 统计输出 tokens 与速率（以 usage 为准，若无则估算为 0）
             completion_tokens = None
             try:
-                if getattr(response, "usage", None) and getattr(response.usage, "completion_tokens", None) is not None:
+                if (
+                    getattr(response, "usage", None)
+                    and getattr(response.usage, "completion_tokens", None) is not None
+                ):
                     completion_tokens = int(response.usage.completion_tokens)
             except Exception:
                 completion_tokens = None
@@ -411,7 +438,9 @@ def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletion
 
             total_s = max(end_ts - start_ts, 1e-9)
             tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
-            print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+            print(
+                f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+            )
             return True
         else:
             print("⚠️  模型没有调用工具，但请求成功")
@@ -420,7 +449,10 @@ def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletion
             # 统计输出 tokens 与速率
             completion_tokens = None
             try:
-                if getattr(response, "usage", None) and getattr(response.usage, "completion_tokens", None) is not None:
+                if (
+                    getattr(response, "usage", None)
+                    and getattr(response.usage, "completion_tokens", None) is not None
+                ):
                     completion_tokens = int(response.usage.completion_tokens)
             except Exception:
                 completion_tokens = None
@@ -430,15 +462,19 @@ def test_tools_usage(client: OpenAI, model_name: str, tools: list[ChatCompletion
 
             total_s = max(end_ts - start_ts, 1e-9)
             tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
-            print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+            print(
+                f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+            )
             return False
-            
+
     except Exception as e:
         print(f"❌ 工具使用测试失败: {e}")
         return False
 
 
-def test_streaming_with_tools(client: OpenAI, model_name: str, tools: list[ChatCompletionToolParam]) -> bool:
+def test_streaming_with_tools(
+    client: OpenAI, model_name: str, tools: list[ChatCompletionToolParam]
+) -> bool:
     """测试流式响应中的工具使用"""
     print("\n=== 测试流式工具使用 ===")
     try:
@@ -451,7 +487,7 @@ def test_streaming_with_tools(client: OpenAI, model_name: str, tools: list[ChatC
                 tool_choice="auto",
                 stream=True,
                 max_tokens=200,
-                stream_options={"include_usage": True}
+                stream_options={"include_usage": True},
             )
         except TypeError:
             response = client.chat.completions.create(
@@ -460,23 +496,23 @@ def test_streaming_with_tools(client: OpenAI, model_name: str, tools: list[ChatC
                 tools=tools,
                 tool_choice="auto",
                 stream=True,
-                max_tokens=200
+                max_tokens=200,
             )
-        
+
         print("流式响应:")
         tool_calls_found = False
         content_parts = []
         first_content_ts = None
         first_any_ts = None
         final_usage_completion_tokens = None
-        
+
         for chunk in response:
             if chunk.choices[0].delta.tool_calls:
                 tool_calls_found = True
                 print("🔧 检测到工具调用...")
                 if first_any_ts is None:
                     first_any_ts = time.perf_counter()
-            
+
             if chunk.choices[0].delta.content:
                 content_parts.append(chunk.choices[0].delta.content)
                 print(chunk.choices[0].delta.content, end="", flush=True)
@@ -493,14 +529,14 @@ def test_streaming_with_tools(client: OpenAI, model_name: str, tools: list[ChatC
                     final_usage_completion_tokens = int(usage.completion_tokens)
             except Exception:
                 pass
-        
+
         end_ts = time.perf_counter()
 
         if tool_calls_found:
             print("\n✅ 流式响应中支持工具调用")
         else:
             print("\n⚠️  流式响应中未检测到工具调用")
-        
+
         # 统计 TTFT 与输出速率
         ttft_ref = first_content_ts or first_any_ts
         if ttft_ref is not None:
@@ -515,13 +551,19 @@ def test_streaming_with_tools(client: OpenAI, model_name: str, tools: list[ChatC
             final_usage_completion_tokens = estimate_tokens(final_text)
 
         # 输出速率基于首字到结束的时长，若无则用总时长
-        start_for_speed = (first_content_ts or first_any_ts or start_ts)
+        start_for_speed = first_content_ts or first_any_ts or start_ts
         duration_s = max(end_ts - start_for_speed, 1e-9)
-        tok_per_s = final_usage_completion_tokens / duration_s if duration_s > 0 else float("inf")
-        print(f"⏱️ 输出速率: {final_usage_completion_tokens} tokens / {duration_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+        tok_per_s = (
+            final_usage_completion_tokens / duration_s
+            if duration_s > 0
+            else float("inf")
+        )
+        print(
+            f"⏱️ 输出速率: {final_usage_completion_tokens} tokens / {duration_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+        )
 
         return tool_calls_found
-        
+
     except Exception as e:
         print(f"❌ 流式工具使用测试失败: {e}")
         return False
@@ -533,43 +575,36 @@ def test_image_support(client: OpenAI, model_name: str) -> bool:
     try:
         # 获取测试图片 URL
         test_image_url = get_test_image_url()
-        
+
         # 构建包含图片的消息
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "text",
-                        "text": "请描述一下这张图片的内容"
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": test_image_url
-                        }
-                    }
-                ]
+                    {"type": "text", "text": "请描述一下这张图片的内容"},
+                    {"type": "image_url", "image_url": {"url": test_image_url}},
+                ],
             }
         ]
-        
+
         start_ts = time.perf_counter()
         response = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            max_tokens=200
+            model=model_name, messages=messages, max_tokens=200
         )
         end_ts = time.perf_counter()
-        
+
         message = response.choices[0].message
         if message.content:
             print("✅ 模型支持图片输入！")
             print(f"图片描述: {message.content}")
-            
+
             # 统计输出 tokens 与速率
             completion_tokens = None
             try:
-                if getattr(response, "usage", None) and getattr(response.usage, "completion_tokens", None) is not None:
+                if (
+                    getattr(response, "usage", None)
+                    and getattr(response.usage, "completion_tokens", None) is not None
+                ):
                     completion_tokens = int(response.usage.completion_tokens)
             except Exception:
                 completion_tokens = None
@@ -579,12 +614,14 @@ def test_image_support(client: OpenAI, model_name: str) -> bool:
 
             total_s = max(end_ts - start_ts, 1e-9)
             tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
-            print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+            print(
+                f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+            )
             return True
         else:
             print("⚠️  模型接受了图片输入但没有返回内容")
             return False
-            
+
     except Exception as e:
         error_msg = str(e).lower()
         if "vision" in error_msg or "image" in error_msg or "multimodal" in error_msg:
@@ -623,14 +660,18 @@ def test_basic_chat_anthropic(params: Dict[str, str]) -> bool:
 
         total_s = max(end_ts - start_ts, 1e-9)
         tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
-        print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+        print(
+            f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+        )
         return True
     except Exception as e:
         print(f"❌ 基本聊天功能失败: {e}")
         return False
 
 
-def test_tools_usage_anthropic(params: Dict[str, str], tools: list[Dict[str, Any]]) -> bool:
+def test_tools_usage_anthropic(
+    params: Dict[str, str], tools: list[Dict[str, Any]]
+) -> bool:
     """测试 Anthropic 格式的工具使用功能"""
     print("\n=== 测试工具使用功能（Anthropic）===")
     try:
@@ -656,7 +697,9 @@ def test_tools_usage_anthropic(params: Dict[str, str], tools: list[Dict[str, Any
             print("✅ 模型支持工具调用！")
             for tool_call in tool_calls:
                 print(f"工具名称: {tool_call.get('name', '')}")
-                print(f"参数: {json.dumps(tool_call.get('input', {}), ensure_ascii=False)}")
+                print(
+                    f"参数: {json.dumps(tool_call.get('input', {}), ensure_ascii=False)}"
+                )
             print(f"⏳ 首字延迟（TTFT）: {ttft_ms:.0f} ms")
             completion_tokens = get_anthropic_output_tokens(response)
             if completion_tokens is None:
@@ -664,7 +707,9 @@ def test_tools_usage_anthropic(params: Dict[str, str], tools: list[Dict[str, Any
 
             total_s = max(end_ts - start_ts, 1e-9)
             tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
-            print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+            print(
+                f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+            )
             return True
 
         print("⚠️  模型没有调用工具，但请求成功")
@@ -676,7 +721,9 @@ def test_tools_usage_anthropic(params: Dict[str, str], tools: list[Dict[str, Any
 
         total_s = max(end_ts - start_ts, 1e-9)
         tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
-        print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+        print(
+            f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+        )
         return False
 
     except Exception as e:
@@ -684,7 +731,9 @@ def test_tools_usage_anthropic(params: Dict[str, str], tools: list[Dict[str, Any
         return False
 
 
-def test_streaming_with_tools_anthropic(params: Dict[str, str], tools: list[Dict[str, Any]]) -> bool:
+def test_streaming_with_tools_anthropic(
+    params: Dict[str, str], tools: list[Dict[str, Any]]
+) -> bool:
     """测试 Anthropic 格式流式响应中的工具使用"""
     print("\n=== 测试流式工具使用（Anthropic）===")
     try:
@@ -773,8 +822,14 @@ def test_streaming_with_tools_anthropic(params: Dict[str, str], tools: list[Dict
 
         start_for_speed = first_content_ts or first_any_ts or start_ts
         duration_s = max(end_ts - start_for_speed, 1e-9)
-        tok_per_s = final_usage_completion_tokens / duration_s if duration_s > 0 else float("inf")
-        print(f"⏱️ 输出速率: {final_usage_completion_tokens} tokens / {duration_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+        tok_per_s = (
+            final_usage_completion_tokens / duration_s
+            if duration_s > 0
+            else float("inf")
+        )
+        print(
+            f"⏱️ 输出速率: {final_usage_completion_tokens} tokens / {duration_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+        )
 
         return tool_calls_found
     except Exception as e:
@@ -829,7 +884,9 @@ def test_image_support_anthropic(params: Dict[str, str]) -> bool:
 
             total_s = max(end_ts - start_ts, 1e-9)
             tok_per_s = completion_tokens / total_s if total_s > 0 else float("inf")
-            print(f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s")
+            print(
+                f"⏱️ 输出速率: {completion_tokens} tokens / {total_s:.2f}s ≈ {tok_per_s:.2f} tok/s"
+            )
             return True
 
         print("⚠️  模型接受了图片输入但没有返回内容")
@@ -843,7 +900,9 @@ def test_image_support_anthropic(params: Dict[str, str]) -> bool:
         error_msg = str(e).lower()
         if "http 401" in error_msg and "openai_api_key" in error_msg:
             print("❌ 图片测试失败（鉴权失败，不代表模型不支持图片）")
-            print("错误信息: 网关返回「Invalid API key / OPENAI_API_KEY」，请检查传入的 ModelScope Token 是否正确且有该模型权限。")
+            print(
+                "错误信息: 网关返回「Invalid API key / OPENAI_API_KEY」，请检查传入的 ModelScope Token 是否正确且有该模型权限。"
+            )
             print(f"原始错误: {e}")
             return False
         if "vision" in error_msg or "image" in error_msg or "multimodal" in error_msg:
@@ -859,7 +918,7 @@ def main():
     try:
         # 获取用户输入
         params = get_model_parameters()
-        
+
         api_format = params["api_format"]
         print(f"\n正在连接到: {params['base_url']} (格式: {api_format})")
 
@@ -870,36 +929,35 @@ def main():
             streaming_success = test_streaming_with_tools_anthropic(params, tools)
             image_success = test_image_support_anthropic(params)
         else:
-            client = OpenAI(
-                base_url=params['base_url'],
-                api_key=params['api_key']
-            )
+            client = OpenAI(base_url=params["base_url"], api_key=params["api_key"])
             tools = create_test_tools_openai()
-            basic_success = test_basic_chat(client, params['model_name'])
-            tools_success = test_tools_usage(client, params['model_name'], tools)
-            streaming_success = test_streaming_with_tools(client, params['model_name'], tools)
-            image_success = test_image_support(client, params['model_name'])
-        
+            basic_success = test_basic_chat(client, params["model_name"])
+            tools_success = test_tools_usage(client, params["model_name"], tools)
+            streaming_success = test_streaming_with_tools(
+                client, params["model_name"], tools
+            )
+            image_success = test_image_support(client, params["model_name"])
+
         # 总结测试结果
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("测试结果总结:")
         print(f"基本聊天功能: {'✅ 通过' if basic_success else '❌ 失败'}")
         print(f"工具使用功能: {'✅ 通过' if tools_success else '❌ 失败'}")
         print(f"流式工具使用: {'✅ 通过' if streaming_success else '❌ 失败'}")
         print(f"图片支持功能: {'✅ 通过' if image_success else '❌ 失败'}")
-        
+
         # 功能支持总结
         print("\n功能支持总结:")
         if tools_success:
             print("🎉 该模型支持工具使用！")
         else:
             print("⚠️  该模型可能不支持工具使用")
-            
+
         if image_success:
             print("🖼️  该模型支持图片输入！")
         else:
             print("⚠️  该模型可能不支持图片输入")
-            
+
     except KeyboardInterrupt:
         print("\n\n用户中断操作")
         sys.exit(0)

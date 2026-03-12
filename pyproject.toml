@@ -1,15 +1,28 @@
 [project]
-name = "llm-tools-test"
+name = "tools-scripts"
 version = "0.1.0"
-description = "OpenAI 格式模型工具使用测试脚本"
-requires-python = ">=3.8.1"
-dependencies = [
+description = "自用脚本集合"
+requires-python = ">=3.12,<3.13"
+
+[project.optional-dependencies]
+llm = [
     "openai>=1.0.0",
 ]
+clean-ids = [
+    "id-validator>=1.0.20",
+]
+openwebui = [
+    "aiohttp>=3.9.0",
+    "fastapi>=0.110.0",
+    "open-webui>=0.5.0",
+    "pydantic>=2.0.0",
+    "pytz>=2024.1",
+    "tiktoken>=0.7.0",
+]
 
-[tool.uv]
-dev-dependencies = [
-    "pytest>=7.0.0",
-    "black>=23.0.0",
-    "flake8>=6.0.0",
+[dependency-groups]
+dev = [
+    "pytest>=8.4.1",
+    "black>=25.1.0",
+    "flake8>=7.3.0",
 ]

@@ -1,12 +1,30 @@
 # Tools
 
-自用实用工具和脚本集合
+自用脚本仓库，按类型分目录存放。
 
-## 使用方法
+## 目录结构
 
+```text
+python/               Python CLI 小脚本
+shell/                Shell 脚本
+openwebui-function/   Open WebUI 相关脚本
 ```
-# 运行可执行脚本
-./bin/pexels-dw.py       # 批量下载 pexels 直链
-./bin/tools-use-test.py  # 测试 LLM 工具调用
-./bin/linux-alo.sh    # linux 自用开机脚本
-./bin/linux-ssh-pwd.sh # linux 关闭一键使用关闭密码登录脚本```
+
+## Python 基线
+
+- 统一使用 `Python 3.12`
+- 仓库根目录有 `.python-version`
+- Python 依赖按用途分组，见 `pyproject.toml`
+
+## 常用脚本
+
+```bash
+uv run python python/tools_use_test.py
+uv run python python/pexels_dw.py
+uv run python python/clean_ids.py
+python openwebui-function/memory_re.py
+bash shell/linux/bootstrap/linux-alo.sh
+bash shell/linux/ssh/disable-password-login.sh
+```
+
+`tmp/` 保留给像 `python/clean_ids.py` 这类需要临时输入文件的脚本使用。
