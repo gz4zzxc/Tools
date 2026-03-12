@@ -1,6 +1,6 @@
 # Tools
 
-自用脚本仓库，按类型分目录存放。
+自用脚本仓库，按语言和用途简单存放。
 
 ## 目录结构
 
@@ -23,8 +23,8 @@ uv run python python/tools_use_test.py
 uv run python python/pexels_dw.py
 uv run python python/clean_ids.py
 python openwebui-function/memory_re.py
-bash shell/linux/bootstrap/linux-alo.sh
-bash shell/linux/ssh/disable-password-login.sh
+bash shell/linux-alo.sh
+bash shell/disable-password-login.sh
 ```
 
 `tmp/` 保留给像 `python/clean_ids.py` 这类需要临时输入文件的脚本使用。
