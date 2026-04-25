@@ -1,15 +1,16 @@
 """
 title: 超级记忆助手 (Pro Max)
-description: v7.6 - 包含历史清洗与上下文感知。根据 Code Review 进行了深度工程化重构，优化了代码可读性、类型安全及边界条件处理。
+description: v7.7 - 适配 Open WebUI 0.9.x 异步数据层与 Memories Router 签名变更。
 author: 南风 (二改Bryce) & Gemini
-version: 7.6
-required_open_webui_version: >= 0.5.0
+version: 7.7
+required_open_webui_version: >= 0.9.0
 """
 
 import json
 import asyncio
 import time
 import datetime
+import inspect
 from typing import Optional, Any, List, Dict, Tuple
 
 import pytz
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 from fastapi.requests import Request
 
 from open_webui.models.users import Users
+from open_webui.models.memories import Memories
 from open_webui.routers.memories import (
     add_memory,
     AddMemoryForm,
@@ -162,7 +164,10 @@ class Filter:
         if not self.valves.enabled or not __user__ or len(body.get("messages", [])) < 2:
             return body
 
-        user = Users.get_user_by_id(__user__["id"])
+        user = await self._get_user_by_id(__user__["id"])
+        if not user:
+            return body
+
         conversation_end_time = time.time()
 
         # 初始化结果对象
@@ -208,29 +213,23 @@ class Filter:
             f"[Cleaner] Starting cleanup task for user {user.id} (Batch: {batch_size})..."
         )
 
-        req = Request(scope={"type": "http", "app": webui_app})
         try:
-            # 使用空格作为通配符查询，这是 Vector DB 的常见 Trick
-            result = await query_memory(
-                req, QueryMemoryForm(content=" ", k=batch_size), user
+            memories = await self._maybe_await(
+                Memories.get_memories_by_user_id(user.id)
             )
-
-            # 检查查询结果有效性
-            if not (result and hasattr(result, "ids") and result.ids and result.ids[0]):
+            if not memories:
                 print("[Cleaner] No memories found to clean.")
                 return
 
-            ids = result.ids[0]
-            docs = result.documents[0]
+            memories = memories[:batch_size]
 
             # 2. 构建审计数据
             memory_list_str = ""
             valid_batch_ids = []
 
-            for i, content in enumerate(docs):
-                mem_id = ids[i]
-                valid_batch_ids.append(mem_id)
-                memory_list_str += f"ID: {mem_id} | Content: {content}\n"
+            for memory in memories:
+                valid_batch_ids.append(memory.id)
+                memory_list_str += f"ID: {memory.id} | Content: {memory.content}\n"
 
             if not memory_list_str:
                 return
@@ -250,7 +249,7 @@ class Filter:
             for mid in ids_to_delete:
                 if mid in valid_batch_ids:
                     try:
-                        await delete_memory_by_id(mid, user)
+                        await self._delete_memory_native(mid, user)
                         deleted_count += 1
                         print(f"[Cleaner] Deleted garbage: {mid}")
                     except Exception as e:
@@ -298,7 +297,7 @@ class Filter:
             try:
                 if action == "update" and target_ids:
                     for mid in target_ids:
-                        await delete_memory_by_id(mid, user)
+                        await self._delete_memory_native(mid, user)
                     updated_count += 1
                 else:
                     saved_count += 1
@@ -322,6 +321,18 @@ class Filter:
         return {"status": "success", "message": final_message}
 
     # ==================== 辅助方法 ====================
+
+    async def _maybe_await(self, value: Any) -> Any:
+        """兼容 Open WebUI 0.9.x 中由同步改为异步的内部 API。"""
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    async def _get_user_by_id(self, user_id: str) -> Any:
+        return await self._maybe_await(Users.get_user_by_id(user_id))
+
+    def _make_request(self) -> Request:
+        return Request(scope={"type": "http", "app": webui_app})
 
     def _build_context_string(self, messages: List[dict]) -> str:
         """构建 [AI] -> [User] 的上下文对，用于准确的意图识别"""
@@ -357,14 +368,23 @@ class Filter:
         now_str = datetime.datetime.now(tz).strftime("%Y年%m月%d日%H点%M分")
         final_content = f"{now_str}：{content}"
 
-        req = Request(scope={"type": "http", "app": webui_app})
+        req = self._make_request()
         await add_memory(req, AddMemoryForm(content=final_content), user)
+
+    async def _delete_memory_native(self, memory_id: str, user: Any) -> bool:
+        """调用系统 API 删除记忆，兼容 0.9.x 的 request 参数。"""
+        req = self._make_request()
+        try:
+            return await delete_memory_by_id(memory_id, req, user)
+        except TypeError:
+            # 兼容 0.8.x 及更早版本的旧 router 签名。
+            return await self._maybe_await(delete_memory_by_id(memory_id, user))
 
     async def _query_similar_memories(
         self, content: str, user: Any
     ) -> List[Dict[str, Any]]:
         """查询相似记忆"""
-        req = Request(scope={"type": "http", "app": webui_app})
+        req = self._make_request()
         try:
             result = await query_memory(
                 req, QueryMemoryForm(content=content, k=5), user
@@ -375,7 +395,7 @@ class Filter:
                 docs = result.documents[0]
                 dists = result.distances[0]
                 for i, doc in enumerate(docs):
-                    similarity = 1 - dists[i]
+                    similarity = dists[i]
                     if similarity >= self.valves.consolidation_threshold:
                         memories.append(
                             {"id": ids[i], "content": doc, "similarity": similarity}
