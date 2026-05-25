@@ -870,7 +870,7 @@ EOF
     fi
 
     # 启动并使服务开机自启
-    if command -v systemctl >/dev/null 2>&1 && systemctl dump >/dev/null 2>&1; then
+    if [ -d /run/systemd/system ]; then
         echo "正在通过 systemctl 启用并启动 fail2ban 服务..."
         systemctl enable fail2ban >/dev/null 2>&1 || true
         if systemctl restart fail2ban; then
@@ -884,7 +884,7 @@ EOF
         if service fail2ban restart >/dev/null 2>&1 || /etc/init.d/fail2ban restart >/dev/null 2>&1; then
             echo -e "${Green}fail2ban 服务已尝试启动。${Font}"
         else
-            echo -e "${Yellow}无法通过传统初始化 systemd 启动 fail2ban，请手动检查服务状态。${Font}"
+            echo -e "${Yellow}无法通过传统 init/service 启动 fail2ban，请手动检查服务状态。${Font}"
         fi
     fi
 }
