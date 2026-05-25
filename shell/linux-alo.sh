@@ -836,6 +836,57 @@ enable_bbr() {
     fi
 }
 
+# 配置 fail2ban
+configure_fail2ban() {
+    echo "配置 fail2ban 防护..."
+
+    if ! command -v fail2ban-client >/dev/null 2>&1; then
+        echo -e "${Red}fail2ban 未成功安装，跳过配置步骤。${Font}"
+        return 1
+    fi
+
+    # 创建自定义 jail.local 配置，避免直接修改 jail.conf
+    local jail_local="/etc/fail2ban/jail.local"
+    if [ ! -f "$jail_local" ]; then
+        echo "创建 fail2ban 本地配置文件 $jail_local..."
+        cat > "$jail_local" <<EOF
+[DEFAULT]
+# 封禁时间：1小时
+bantime = 1h
+# 寻找时间窗口：10分钟
+findtime = 10m
+# 最大尝试次数：5次
+maxretry = 5
+
+[sshd]
+enabled = true
+port = ssh
+EOF
+        echo -e "${Green}已生成默认 jail.local 配置。${Font}"
+    else
+        echo -e "${Yellow}$jail_local 已存在，跳过覆盖以保留用户既有配置。${Font}"
+    fi
+
+    # 启动并使服务开机自启
+    if command -v systemctl >/dev/null 2>&1 && systemctl dump >/dev/null 2>&1; then
+        echo "正在通过 systemctl 启用并启动 fail2ban 服务..."
+        systemctl enable fail2ban >/dev/null 2>&1 || true
+        if systemctl restart fail2ban; then
+            echo -e "${Green}fail2ban 服务已成功启动并启用。${Font}"
+        else
+            echo -e "${Red}fail2ban 服务启动失败，请检查系统日志。${Font}"
+        fi
+    else
+        # 针对不支持 systemd 的特殊环境（如 Docker 容器或 WSL1）
+        echo -e "${Yellow}系统不支持 systemd，尝试使用 service 命令...${Font}"
+        if service fail2ban restart >/dev/null 2>&1 || /etc/init.d/fail2ban restart >/dev/null 2>&1; then
+            echo -e "${Green}fail2ban 服务已尝试启动。${Font}"
+        else
+            echo -e "${Yellow}无法通过传统初始化 systemd 启动 fail2ban，请手动检查服务状态。${Font}"
+        fi
+    fi
+}
+
 # 主函数
 main() {
     check_root
@@ -856,7 +907,7 @@ main() {
 
     # 安装必备软件
     echo "安装必备软件..."
-    apt-get install -y git wget vim nano zsh curl tar zip unzip sudo ca-certificates
+    apt-get install -y git wget vim nano zsh curl tar zip unzip sudo ca-certificates fail2ban
 
     # 设置 Zsh 为默认终端
     echo "设置 Zsh 为默认终端..."
@@ -876,6 +927,9 @@ main() {
 
     # 修改 SSH 配置
     configure_ssh
+
+    # 配置 fail2ban 防护
+    configure_fail2ban
 
     # 修改 Swap 分区
     setup_swap
