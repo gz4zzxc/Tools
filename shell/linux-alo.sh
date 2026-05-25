@@ -842,15 +842,17 @@ configure_fail2ban() {
 
     if ! command -v fail2ban-client >/dev/null 2>&1; then
         echo -e "${Red}fail2ban 未成功安装，跳过配置步骤。${Font}"
-        return 1
+        return 0
     fi
 
     # 创建自定义 jail.local 配置，避免直接修改 jail.conf
     local jail_local="/etc/fail2ban/jail.local"
     if [ ! -f "$jail_local" ]; then
         echo "创建 fail2ban 本地配置文件 $jail_local..."
-        cat > "$jail_local" <<EOF
+        cat > "$jail_local" <<'EOF'
 [DEFAULT]
+# 忽略的 IP 列表（防止误封本机）
+ignoreip = 127.0.0.1/8 ::1
 # 封禁时间：1小时
 bantime = 1h
 # 寻找时间窗口：10分钟
