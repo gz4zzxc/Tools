@@ -1,8 +1,8 @@
 """
 title: 超级记忆助手 (Pro Max v8)
-description: v8.0.1 - Open WebUI 0.11.x 原生 Memory Operations；内部 API 改为运行时按需导入，提升 Function 保存兼容性。
+description: v8.0.3 - 记忆 LLM 503/429 自动重试；错误提示可读；outlet 软失败不影响主聊天。
 author: 南风 (二改Bryce) & Gemini & OpenAI
-version: 8.0.1
+version: 8.0.3
 required_open_webui_version: >= 0.11.0
 """
 
@@ -17,8 +17,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from pydantic import BaseModel, Field
-
-
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +99,7 @@ CLEANUP_SYSTEM_PROMPT = """你是一个严格的用户长期记忆数据库清�
 # Filter
 # ============================================================================
 
+
 class Filter:
     """
     Open WebUI 0.11.x 原生长期记忆 Filter。
@@ -171,6 +170,22 @@ class Filter:
             json_schema_extra={"title": "⏱️ API 超时"},
         )
 
+        api_max_retries: int = Field(
+            default=3,
+            ge=0,
+            le=8,
+            description="记忆 LLM 调用失败时的最大重试次数（不含首次请求）。对 429/502/503/504 与网络超时生效。",
+            json_schema_extra={"title": "🔁 API 最大重试"},
+        )
+
+        api_retry_base_seconds: float = Field(
+            default=1.5,
+            ge=0.2,
+            le=30.0,
+            description="重试退避基数秒数；实际等待约为 base * 2^attempt。",
+            json_schema_extra={"title": "⏳ 重试退避基数"},
+        )
+
         request_json_object: bool = Field(
             default=False,
             description="向兼容接口发送 response_format={type: json_object}。部分第三方接口不兼容，默认关闭。",
@@ -227,16 +242,19 @@ class Filter:
         skip_if_native_background_review_enabled: bool = Field(
             default=True,
             description="检测到 Open WebUI 原生 Background Memory Review 时跳过本插件写入，避免双写。",
-            json_schema_extra={"title": "🧯 避免原生 Memory 双写"},
+            json_schema_extra={"title": "🧯 避免原生 Memory 双写（默认开启）"},
         )
 
         # ------------------------------------------------------------------
         # Retroactive cleanup / migration
         # ------------------------------------------------------------------
-        enable_retroactive_cleanup: bool = Field(
+        admin_cleanup_all_users: bool = Field(
             default=False,
-            description="开启后触发历史记忆清洗/迁移；清洗完成后请关闭。",
-            json_schema_extra={"title": "🧹 历史清洗模式（用完即关）"},
+            description=(
+                "仅管理员可触发。开启后，管理员下一次正常聊天会在后台遍历全部用户，"
+                "一次性清洗/迁移旧 Memory；普通用户无需操作且会继续正常使用。完成后请关闭。"
+            ),
+            json_schema_extra={"title": "🧹 管理员：一次性清洗全部用户"},
         )
 
         cleanup_batch_size: int = Field(
@@ -251,8 +269,8 @@ class Filter:
             default=300,
             ge=5,
             le=2000,
-            description="单次历史清洗任务最多扫描的记忆总数。",
-            json_schema_extra={"title": "🧹 单次最大扫描量"},
+            description="全站迁移时，每个用户最多扫描的旧记忆数量。",
+            json_schema_extra={"title": "🧹 每用户最大扫描量"},
         )
 
         # ------------------------------------------------------------------
@@ -287,8 +305,10 @@ class Filter:
         # 注意：这是单 worker 内的锁；多 worker 部署无法跨进程互斥。
         self._user_locks: Dict[str, asyncio.Lock] = {}
 
-        # 历史清洗只允许同一用户同时跑一个任务。
-        self._cleanup_running: set[str] = set()
+        # 全站迁移状态。当前 worker 内只允许跑一个全站任务。
+        self._global_cleanup_running: bool = False
+        self._global_cleanup_completed: bool = False
+        self._global_cleanup_summary: Dict[str, int] = {}
 
     # ======================================================================
     # Open WebUI hooks
@@ -359,6 +379,10 @@ class Filter:
         if not self.valves.enabled or not __user__:
             return body
 
+        if not self.valves.admin_cleanup_all_users and self._global_cleanup_completed:
+            self._global_cleanup_completed = False
+            self._global_cleanup_summary = {}
+
         key = self._request_key(__user__, __metadata__, body)
         state = self._request_state.pop(key, None) if key else None
 
@@ -386,6 +410,7 @@ class Filter:
 
             else:
                 from open_webui.models.users import Users
+
                 user = await Users.get_user_by_id(__user__["id"])
                 if not user:
                     memory_result = {
@@ -393,9 +418,8 @@ class Filter:
                         "message": "未找到用户",
                         "counts": {},
                     }
-                elif self.valves.enable_retroactive_cleanup:
-                    memory_result = self._start_cleanup_task(
-                        user=user,
+                elif self.valves.admin_cleanup_all_users and user.role == "admin":
+                    memory_result = self._start_global_cleanup_task(
                         request=__request__,
                     )
                 elif await self._native_background_review_conflicts():
@@ -415,7 +439,7 @@ class Filter:
             log.exception("[SuperMemory] outlet processing failed: %s", exc)
             memory_result = {
                 "status": "error",
-                "message": f"处理异常: {type(exc).__name__}",
+                "message": self._friendly_error_message(exc),
                 "counts": {},
             }
 
@@ -488,7 +512,9 @@ class Filter:
                 user_prompt=review_prompt,
             )
 
-            raw_operations = parsed.get("operations", []) if isinstance(parsed, dict) else []
+            raw_operations = (
+                parsed.get("operations", []) if isinstance(parsed, dict) else []
+            )
             allowed_ids = {m.id for m in candidates}
 
             operations = self._validate_operations(
@@ -595,136 +621,196 @@ class Filter:
     # Cleanup / migration
     # ======================================================================
 
-    def _start_cleanup_task(
+    def _start_global_cleanup_task(
         self,
-        user: Any,
         request: Optional[Any],
     ) -> Dict[str, Any]:
         if request is None:
             return {
                 "status": "error",
-                "message": "缺少 Request，无法清洗",
+                "message": "缺少 Request，无法执行全站迁移",
                 "counts": {},
             }
 
-        uid = user.id
-        if uid in self._cleanup_running:
+        if self._global_cleanup_running:
             return {
                 "status": "success",
-                "message": "历史清洗正在运行",
-                "counts": {},
+                "message": "全站历史记忆迁移正在后台运行",
+                "counts": self._global_cleanup_summary,
             }
 
-        task = asyncio.create_task(
-            self._run_retroactive_cleanup(
-                user=user,
-                request=request,
-            )
-        )
+        if self._global_cleanup_completed:
+            s = self._global_cleanup_summary
+            return {
+                "status": "success",
+                "message": (
+                    "全站迁移已完成 "
+                    f"(用户 {s.get('users_scanned', 0)} / "
+                    f"更新 {s.get('updated', 0)} / "
+                    f"删除 {s.get('deleted', 0)})；"
+                    "请关闭「一次性清洗全部用户」开关"
+                ),
+                "counts": s,
+            }
+
+        self._global_cleanup_running = True
+        self._global_cleanup_summary = {
+            "users_scanned": 0,
+            "users_with_memories": 0,
+            "memories_scanned": 0,
+            "updated": 0,
+            "deleted": 0,
+            "skipped": 0,
+            "errors": 0,
+        }
+
+        task = asyncio.create_task(self._run_global_cleanup(request=request))
 
         def _done(done_task: asyncio.Task):
             try:
                 done_task.result()
             except Exception as exc:
-                log.exception("[SuperMemory] cleanup task failed: %s", exc)
+                log.exception("[SuperMemory] global cleanup task failed: %s", exc)
 
         task.add_done_callback(_done)
 
         return {
             "status": "success",
-            "message": "历史清洗已启动",
-            "counts": {},
+            "message": "全站历史记忆迁移已在后台启动；普通用户无需任何操作",
+            "counts": self._global_cleanup_summary,
         }
 
-    async def _run_retroactive_cleanup(
+    async def _run_global_cleanup(
+        self,
+        request: Any,
+    ) -> None:
+        from open_webui.models.users import Users
+
+        page_size = 100
+        offset = 0
+
+        try:
+            while True:
+                page = await Users.get_users(skip=offset, limit=page_size)
+                users = (page or {}).get("users", [])
+                if not users:
+                    break
+
+                for target_user in users:
+                    self._global_cleanup_summary["users_scanned"] += 1
+                    try:
+                        counts = await self._cleanup_one_user(
+                            user=target_user,
+                            request=request,
+                        )
+                    except Exception as exc:
+                        self._global_cleanup_summary["errors"] += 1
+                        log.exception(
+                            "[SuperMemory] global cleanup failed user=%s: %s",
+                            getattr(target_user, "id", "unknown"),
+                            exc,
+                        )
+                        continue
+
+                    if counts.get("memories_scanned", 0) > 0:
+                        self._global_cleanup_summary["users_with_memories"] += 1
+
+                    for key in ("memories_scanned", "updated", "deleted", "skipped"):
+                        self._global_cleanup_summary[key] += counts.get(key, 0)
+
+                offset += len(users)
+                total = int((page or {}).get("total") or 0)
+                if offset >= total or len(users) < page_size:
+                    break
+
+                await asyncio.sleep(0)
+
+            self._global_cleanup_completed = True
+            log.info(
+                "[SuperMemory] GLOBAL CLEANUP COMPLETE summary=%s",
+                self._global_cleanup_summary,
+            )
+        finally:
+            self._global_cleanup_running = False
+
+    async def _cleanup_one_user(
         self,
         user: Any,
         request: Any,
-    ) -> None:
+    ) -> Dict[str, int]:
+        from open_webui.models.memories import Memories
+        from open_webui.routers.memories import UpdateMemoriesForm, update_memories
+
         uid = user.id
-        if uid in self._cleanup_running:
-            return
-
-        self._cleanup_running.add(uid)
         lock = self._user_locks.setdefault(uid, asyncio.Lock())
-
-        total_counts = {
-            "created": 0,
+        counts = {
+            "memories_scanned": 0,
             "updated": 0,
             "deleted": 0,
             "skipped": 0,
         }
 
-        try:
-            async with lock:
-                from open_webui.models.memories import Memories
-                from open_webui.routers.memories import UpdateMemoriesForm, update_memories
+        async with lock:
+            memories = await Memories.get_memories_by_user_id(uid) or []
+            memories = sorted(
+                memories,
+                key=lambda m: (getattr(m, "updated_at", 0) or 0),
+            )[: self.valves.cleanup_max_memories]
 
-                memories = await Memories.get_memories_by_user_id(uid) or []
-                memories = sorted(
-                    memories,
-                    key=lambda m: (getattr(m, "updated_at", 0) or 0),
-                )[: self.valves.cleanup_max_memories]
+            counts["memories_scanned"] = len(memories)
+            if not memories:
+                return counts
 
-                if not memories:
-                    log.info("[SuperMemory] cleanup user=%s: no memories", uid)
-                    return
+            batch_size = self.valves.cleanup_batch_size
 
-                batch_size = self.valves.cleanup_batch_size
+            for start in range(0, len(memories), batch_size):
+                batch = memories[start : start + batch_size]
+                allowed_ids = {m.id for m in batch}
 
-                for start in range(0, len(memories), batch_size):
-                    batch = memories[start : start + batch_size]
-                    allowed_ids = {m.id for m in batch}
-                    memory_text = self._render_memories(batch)
+                parsed = await self._call_llm_json(
+                    system_prompt=CLEANUP_SYSTEM_PROMPT,
+                    user_prompt=(
+                        "请清洗下面这批旧记忆。\\n\\n"
+                        f"【旧记忆】\\n{self._render_memories(batch)}"
+                    ),
+                )
 
-                    parsed = await self._call_llm_json(
-                        system_prompt=CLEANUP_SYSTEM_PROMPT,
-                        user_prompt=(
-                            "请清洗下面这批旧记忆。\n\n"
-                            f"【旧记忆】\n{memory_text}"
-                        ),
-                    )
+                raw_operations = (
+                    parsed.get("operations", []) if isinstance(parsed, dict) else []
+                )
+                operations = self._validate_operations(
+                    raw_operations=raw_operations,
+                    allowed_ids=allowed_ids,
+                    cleanup_mode=True,
+                )
 
-                    raw_operations = (
-                        parsed.get("operations", [])
-                        if isinstance(parsed, dict)
-                        else []
-                    )
+                if not operations:
+                    continue
 
-                    operations = self._validate_operations(
-                        raw_operations=raw_operations,
-                        allowed_ids=allowed_ids,
-                        cleanup_mode=True,
-                    )
+                results = await update_memories(
+                    request,
+                    UpdateMemoriesForm(
+                        operations=operations,
+                        source="background_review",
+                    ),
+                    user,
+                )
 
-                    if not operations:
-                        continue
+                rc = self._count_update_results(results)
+                counts["updated"] += rc.get("updated", 0)
+                counts["deleted"] += rc.get("deleted", 0)
+                counts["skipped"] += rc.get("skipped", 0)
+                await asyncio.sleep(0)
 
-                    results = await update_memories(
-                        request,
-                        UpdateMemoriesForm(
-                            operations=operations,
-                            source="background_review",
-                        ),
-                        user,
-                    )
-
-                    counts = self._count_update_results(results)
-                    for key, value in counts.items():
-                        total_counts[key] = total_counts.get(key, 0) + value
-
-                    # 避免一次清洗对外部 LLM / embedding 服务形成突发压力。
-                    await asyncio.sleep(0)
-
-            log.info(
-                "[SuperMemory] cleanup complete user=%s scanned=%s counts=%s",
-                uid,
-                len(memories),
-                total_counts,
-            )
-
-        finally:
-            self._cleanup_running.discard(uid)
+        log.info(
+            "[SuperMemory] cleanup user=%s scanned=%s updated=%s deleted=%s skipped=%s",
+            uid,
+            counts["memories_scanned"],
+            counts["updated"],
+            counts["deleted"],
+            counts["skipped"],
+        )
+        return counts
 
     # ======================================================================
     # Operation validation
@@ -752,7 +838,10 @@ class Filter:
         touched_ids: set[str] = set()
 
         for raw in raw_operations:
-            if len(validated) >= self.valves.max_operations_per_turn and not cleanup_mode:
+            if (
+                len(validated) >= self.valves.max_operations_per_turn
+                and not cleanup_mode
+            ):
                 break
 
             if not isinstance(raw, dict):
@@ -891,40 +980,103 @@ class Filter:
         if self.valves.api_key.strip():
             headers["Authorization"] = f"Bearer {self.valves.api_key.strip()}"
 
-        timeout = aiohttp.ClientTimeout(
-            total=float(self.valves.api_timeout_seconds)
-        )
+        timeout = aiohttp.ClientTimeout(total=float(self.valves.api_timeout_seconds))
+        max_retries = int(self.valves.api_max_retries)
+        base_delay = float(self.valves.api_retry_base_seconds)
+        retryable_status = {408, 409, 425, 429, 500, 502, 503, 504}
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                self.valves.api_url,
-                headers=headers,
-                json=payload,
-            ) as response:
-                raw = await response.text()
+        last_error: Optional[Exception] = None
 
-                if response.status < 200 or response.status >= 300:
-                    safe_body = raw[:500].replace("\n", " ")
-                    raise RuntimeError(
-                        f"Memory LLM API HTTP {response.status}: {safe_body}"
+        for attempt in range(max_retries + 1):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        self.valves.api_url,
+                        headers=headers,
+                        json=payload,
+                    ) as response:
+                        raw = await response.text()
+                        status = response.status
+
+                        if status < 200 or status >= 300:
+                            safe_body = raw[:300].replace("\n", " ")
+                            err = RuntimeError(
+                                f"Memory LLM API HTTP {status}: {safe_body}"
+                            )
+                            if status in retryable_status and attempt < max_retries:
+                                last_error = err
+                                delay = base_delay * (2**attempt)
+                                log.warning(
+                                    "[SuperMemory] LLM HTTP %s, retry %s/%s in %.1fs: %s",
+                                    status,
+                                    attempt + 1,
+                                    max_retries,
+                                    delay,
+                                    safe_body[:160],
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            raise err
+
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError as exc:
+                            raise RuntimeError(
+                                "Memory LLM API returned invalid JSON"
+                            ) from exc
+
+                text = self._extract_chat_completion_text(data)
+                parsed = self._parse_json_object(text)
+
+                if self.valves.debug_logging:
+                    log.debug(
+                        "[SuperMemory] LLM raw=%r parsed=%s",
+                        text[:2000],
+                        parsed,
                     )
 
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError("Memory LLM API returned invalid JSON") from exc
+                return parsed
 
-        text = self._extract_chat_completion_text(data)
-        parsed = self._parse_json_object(text)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    delay = base_delay * (2**attempt)
+                    log.warning(
+                        "[SuperMemory] LLM network error, retry %s/%s in %.1fs: %s",
+                        attempt + 1,
+                        max_retries,
+                        delay,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise RuntimeError(f"Memory LLM 网络错误: {exc}") from exc
 
-        if self.valves.debug_logging:
-            log.debug(
-                "[SuperMemory] LLM raw=%r parsed=%s",
-                text[:2000],
-                parsed,
-            )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Memory LLM API 调用失败")
 
-        return parsed
+    @staticmethod
+    def _friendly_error_message(exc: Exception) -> str:
+        text = str(exc) or type(exc).__name__
+        lower = text.lower()
+
+        if "http 503" in lower or "service_unavailable" in lower or "负载已饱和" in text:
+            return "记忆 API 暂时繁忙(503)，已跳过本轮写入；聊天不受影响"
+        if "http 429" in lower or "rate" in lower:
+            return "记忆 API 限流(429)，已跳过本轮写入；聊天不受影响"
+        if "http 401" in lower or "http 403" in lower:
+            return "记忆 API 鉴权失败，请检查 API Key"
+        if "timeout" in lower or "网络错误" in text:
+            return "记忆 API 超时/网络异常，已跳过本轮写入；聊天不受影响"
+        if "invalid json" in lower:
+            return "记忆 API 返回非 JSON，已跳过本轮写入"
+
+        # 截断，避免状态条被上游长错误刷爆
+        short = text.replace("\n", " ").strip()
+        if len(short) > 120:
+            short = short[:117] + "..."
+        return f"记忆处理失败: {short}"
 
     @staticmethod
     def _extract_chat_completion_text(data: Any) -> str:
@@ -1075,7 +1227,9 @@ class Filter:
                         parts.append(value)
                     elif isinstance(value, list):
                         for sub in value:
-                            if isinstance(sub, dict) and isinstance(sub.get("text"), str):
+                            if isinstance(sub, dict) and isinstance(
+                                sub.get("text"), str
+                            ):
                                 parts.append(sub["text"])
             if parts:
                 return "\n".join(parts)
@@ -1168,11 +1322,7 @@ class Filter:
             or body.get("session_id")
             or ""
         )
-        message_id = str(
-            metadata.get("message_id")
-            or body.get("id")
-            or ""
-        )
+        message_id = str(metadata.get("message_id") or body.get("id") or "")
 
         if not uid:
             return ""
@@ -1258,26 +1408,16 @@ class Filter:
 
         # v0.11 的 prompt_tokens/completion_tokens 代表最近一次 model call；
         # input_tokens/output_tokens 则可能是多次工具调用累计值。
-        prompt_tokens = self._safe_int(
-            usage.get("prompt_tokens")
-            if usage
-            else None
-        )
+        prompt_tokens = self._safe_int(usage.get("prompt_tokens") if usage else None)
         completion_tokens = self._safe_int(
-            usage.get("completion_tokens")
-            if usage
-            else None
+            usage.get("completion_tokens") if usage else None
         )
 
         if prompt_tokens is not None:
             context = self._format_token_count(prompt_tokens)
             context_approx = False
         else:
-            estimated = (
-                state.get("estimated_prompt_tokens")
-                if state
-                else None
-            )
+            estimated = state.get("estimated_prompt_tokens") if state else None
             if isinstance(estimated, int) and estimated > 0:
                 context = self._format_token_count(estimated)
                 context_approx = True
@@ -1348,11 +1488,7 @@ class Filter:
 
             for message in messages:
                 total += 3
-                total += len(
-                    encoding.encode(
-                        str(message.get("role") or "")
-                    )
-                )
+                total += len(encoding.encode(str(message.get("role") or "")))
 
                 content = message.get("content", "")
                 if isinstance(content, str):
@@ -1428,9 +1564,7 @@ class Filter:
 
         if self.valves.show_context_length:
             approx = "~" if stats.get("context_approx") == "1" else ""
-            parts.append(
-                f"📏 上下文: {approx}{stats.get('context', 'N/A')}"
-            )
+            parts.append(f"📏 上下文: {approx}{stats.get('context', 'N/A')}")
 
         parts.extend(
             [
