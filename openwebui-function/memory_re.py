@@ -1,8 +1,8 @@
 """
 title: 超级记忆助手 (Pro Max v8)
-description: v8.0 - 原生适配 Open WebUI 0.11.x Memory Operations、异步数据层、请求级统计与并发安全。
+description: v8.0.1 - Open WebUI 0.11.x 原生 Memory Operations；内部 API 改为运行时按需导入，提升 Function 保存兼容性。
 author: 南风 (二改Bryce) & Gemini & OpenAI
-version: 8.0
+version: 8.0.1
 required_open_webui_version: >= 0.11.0
 """
 
@@ -16,19 +16,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
-from fastapi.requests import Request
 from pydantic import BaseModel, Field
 
-from open_webui.models.config import Config
-from open_webui.models.memories import Memories
-from open_webui.models.users import Users
-from open_webui.routers.memories import (
-    QueryMemoryForm,
-    UpdateMemoriesForm,
-    query_memory,
-    update_memories,
-)
-from open_webui.utils.misc import get_content_from_message
 
 
 log = logging.getLogger(__name__)
@@ -310,7 +299,7 @@ class Filter:
         body: dict,
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
-        __request__: Optional[Request] = None,
+        __request__: Optional[Any] = None,
     ) -> dict:
         if not self.valves.enabled:
             return body
@@ -364,7 +353,7 @@ class Filter:
         __event_emitter__: Any = None,
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
-        __request__: Optional[Request] = None,
+        __request__: Optional[Any] = None,
         __model__: Optional[dict] = None,
     ) -> dict:
         if not self.valves.enabled or not __user__:
@@ -396,6 +385,7 @@ class Filter:
                 }
 
             else:
+                from open_webui.models.users import Users
                 user = await Users.get_user_by_id(__user__["id"])
                 if not user:
                     memory_result = {
@@ -403,17 +393,17 @@ class Filter:
                         "message": "未找到用户",
                         "counts": {},
                     }
+                elif self.valves.enable_retroactive_cleanup:
+                    memory_result = self._start_cleanup_task(
+                        user=user,
+                        request=__request__,
+                    )
                 elif await self._native_background_review_conflicts():
                     memory_result = {
                         "status": "skipped",
                         "message": "检测到原生后台记忆审查，已避让防止双写",
                         "counts": {},
                     }
-                elif self.valves.enable_retroactive_cleanup:
-                    memory_result = self._start_cleanup_task(
-                        user=user,
-                        request=__request__,
-                    )
                 else:
                     memory_result = await self._process_memory(
                         body=body,
@@ -450,7 +440,7 @@ class Filter:
         self,
         body: dict,
         user: Any,
-        request: Optional[Request],
+        request: Optional[Any],
     ) -> Dict[str, Any]:
         if request is None:
             return {
@@ -514,6 +504,8 @@ class Filter:
                     "counts": {},
                 }
 
+            from open_webui.routers.memories import UpdateMemoriesForm, update_memories
+
             results = await update_memories(
                 request,
                 UpdateMemoriesForm(
@@ -543,12 +535,15 @@ class Filter:
         self,
         target_text: str,
         user: Any,
-        request: Request,
+        request: Any,
     ) -> List[Any]:
         """
         先放向量检索到的相关记忆，再用最近更新的记忆补足。
         这样既能找出需要 replace 的旧事实，又不会把整个记忆库都塞给 LLM。
         """
+        from open_webui.models.memories import Memories
+        from open_webui.routers.memories import QueryMemoryForm, query_memory
+
         all_memories = await Memories.get_memories_by_user_id(user.id) or []
         if not all_memories:
             return []
@@ -603,7 +598,7 @@ class Filter:
     def _start_cleanup_task(
         self,
         user: Any,
-        request: Optional[Request],
+        request: Optional[Any],
     ) -> Dict[str, Any]:
         if request is None:
             return {
@@ -644,7 +639,7 @@ class Filter:
     async def _run_retroactive_cleanup(
         self,
         user: Any,
-        request: Request,
+        request: Any,
     ) -> None:
         uid = user.id
         if uid in self._cleanup_running:
@@ -662,6 +657,9 @@ class Filter:
 
         try:
             async with lock:
+                from open_webui.models.memories import Memories
+                from open_webui.routers.memories import UpdateMemoriesForm, update_memories
+
                 memories = await Memories.get_memories_by_user_id(uid) or []
                 memories = sorted(
                     memories,
@@ -1047,14 +1045,8 @@ class Filter:
 
     @staticmethod
     def _message_text(message: dict) -> str:
-        try:
-            value = get_content_from_message(message)
-            if isinstance(value, str):
-                return value
-        except Exception:
-            pass
-
         content = message.get("content", "")
+
         if isinstance(content, str):
             return content
 
@@ -1063,10 +1055,30 @@ class Filter:
             for item in content:
                 if not isinstance(item, dict):
                     continue
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-            return "\n".join(parts)
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            if parts:
+                return "\n".join(parts)
+
+        # v0.11 assistant messages may preserve structured output.
+        output = message.get("output")
+        if isinstance(output, list):
+            parts = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") in {"message", "output_text"}:
+                    value = item.get("content") or item.get("text")
+                    if isinstance(value, str):
+                        parts.append(value)
+                    elif isinstance(value, list):
+                        for sub in value:
+                            if isinstance(sub, dict) and isinstance(sub.get("text"), str):
+                                parts.append(sub["text"])
+            if parts:
+                return "\n".join(parts)
 
         return ""
 
@@ -1098,7 +1110,7 @@ class Filter:
 
     def _should_process_request(
         self,
-        request: Optional[Request],
+        request: Optional[Any],
         metadata: Optional[dict],
     ) -> bool:
         metadata = metadata or {}
@@ -1124,6 +1136,8 @@ class Filter:
             return False
 
         try:
+            from open_webui.models.config import Config
+
             return bool(
                 await Config.get(
                     "memories.background_review.enable",
