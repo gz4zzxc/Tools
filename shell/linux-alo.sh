@@ -561,6 +561,11 @@ install_zsh_plugins() {
         fi
     fi
 
+    # 在任何追加操作前，修复非空 .zshrc 缺少 EOF newline 的情况。
+    if [ -s "$zshrc_file" ] && [ "$(tail -c 1 "$zshrc_file" | wc -l)" -eq 0 ]; then
+        printf '\n' >> "$zshrc_file"
+    fi
+
     # 系统包不应再作为 Oh My Zsh 插件名加载，避免重复加载或找不到 .plugin.zsh。
     if [ -d "$HOME/.oh-my-zsh" ]; then
         plugins_line_new="plugins=(git)"
