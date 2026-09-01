@@ -218,8 +218,11 @@ geo_check() {
 
 # 检测操作系统类型
 detect_os() {
-    if [ -e /etc/os-release ]; then
-        . /etc/os-release
+    # 可传入替代文件进行检测测试；正常执行时使用系统 os-release。
+    local os_release_file="${1:-/etc/os-release}"
+
+    if [ -e "$os_release_file" ]; then
+        . "$os_release_file"
         OS=${ID:-}
         CODENAME=${VERSION_CODENAME:-}
         VERSION_ID=${VERSION_ID:-}
@@ -858,4 +861,6 @@ main() {
     fi
 }
 
-main
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main
+fi
