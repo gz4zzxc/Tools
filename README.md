@@ -27,4 +27,6 @@ bash shell/linux-alo.sh
 bash shell/disable-password-login.sh
 ```
 
+`shell/linux-alo.sh` 仅支持 Debian 11 及以上版本（11/12/13+）。
+
 `tmp/` 保留给像 `python/clean_ids.py` 这类需要临时输入文件的脚本使用。

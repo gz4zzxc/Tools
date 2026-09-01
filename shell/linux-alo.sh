@@ -218,40 +218,31 @@ geo_check() {
 
 # 检测操作系统类型
 detect_os() {
-    if [ -e /etc/os-release ]; then
-        . /etc/os-release
+    # 可传入替代文件进行检测测试；正常执行时使用系统 os-release。
+    local os_release_file="${1:-/etc/os-release}"
+
+    if [ -e "$os_release_file" ]; then
+        . "$os_release_file"
         OS=${ID:-}
         CODENAME=${VERSION_CODENAME:-}
         VERSION_ID=${VERSION_ID:-}
 
+        if [ "$OS" != "debian" ]; then
+            echo -e "${Red}不支持的操作系统: ${OS:-unknown}。仅支持 Debian 11 及以上版本（11/12/13+）。${Font}" >&2
+            exit 1
+        fi
+
         # 对于某些系统没有 VERSION_CODENAME 的情况进行兜底
-        if [ -z "$CODENAME" ]; then
-            # Ubuntu 常见兜底
-            if [ "${OS}" = "ubuntu" ] && [ -n "${UBUNTU_CODENAME:-}" ]; then
-                CODENAME=${UBUNTU_CODENAME}
-            elif command -v lsb_release >/dev/null 2>&1; then
-                CODENAME=$(lsb_release -cs || true)
-            fi
+        if [ -z "$CODENAME" ] && command -v lsb_release >/dev/null 2>&1; then
+            CODENAME=$(lsb_release -cs || true)
         fi
 
         # 最后再基于 VERSION_ID 做一次简单映射兜底
         if [ -z "$CODENAME" ] && [ -n "$VERSION_ID" ]; then
-            case "$OS" in
-                debian)
-                    case "$VERSION_ID" in
-                        12*) CODENAME="bookworm" ;;
-                        11*) CODENAME="bullseye" ;;
-                        10*) CODENAME="buster" ;;
-                    esac
-                    ;;
-                ubuntu)
-                    case "$VERSION_ID" in
-                        24.04*) CODENAME="noble" ;;
-                        22.04*) CODENAME="jammy" ;;
-                        20.04*) CODENAME="focal" ;;
-                        18.04*) CODENAME="bionic" ;;
-                    esac
-                    ;;
+            case "$VERSION_ID" in
+                13*) CODENAME="trixie" ;;
+                12*) CODENAME="bookworm" ;;
+                11*) CODENAME="bullseye" ;;
             esac
         fi
 
@@ -270,7 +261,8 @@ detect_os() {
 # 检查 Debian 版本是否受支持（仅支持 Debian 11+）
 check_supported_debian_version() {
     if [ "$OS" != "debian" ]; then
-        return 0
+        echo -e "${Red}不支持的操作系统: ${OS:-unknown}。仅支持 Debian 11 及以上版本（11/12/13+）。${Font}" >&2
+        exit 1
     fi
 
     major=""
@@ -342,106 +334,28 @@ EOF
 EOF
 }
 
-# 使用 Deb822 写入 Ubuntu 软件源配置
-write_ubuntu_sources_deb822() {
-    mirror_base="$1"
-    security_base="$2"
-    sources_file="/etc/apt/sources.list.d/ubuntu.sources"
-
-    # 备份旧配置（仅一次）
-    if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
-        cp /etc/apt/sources.list /etc/apt/sources.list.bak
-        echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
-    fi
-
-    if [ -f "$sources_file" ] && [ ! -f "${sources_file}.bak" ]; then
-        cp "$sources_file" "${sources_file}.bak"
-        echo -e "${Green}备份原有 ubuntu.sources 至 ${sources_file}.bak${Font}"
-    fi
-
-    cat > "$sources_file" <<EOF
-Types: deb
-URIs: ${mirror_base}
-Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-backports
-Components: main restricted universe multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-Types: deb
-URIs: ${security_base}
-Suites: ${CODENAME}-security
-Components: main restricted universe multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-EOF
-
-    # 避免与 Deb822 重复配置
-    cat > /etc/apt/sources.list <<'EOF'
-# This file is managed by linux-alo.sh.
-# Ubuntu sources are configured in /etc/apt/sources.list.d/ubuntu.sources.
-EOF
-}
-
 # 设置国内 APT 镜像源
 set_cn_mirror() {
     echo "正在切换到中国科技大学 (USTC) 的镜像源..."
 
-    # 根据不同的操作系统写入相应的镜像源（覆盖写入，避免文件无限增大）
-    if [ "$OS" = "debian" ]; then
-        # 安全源固定使用 Debian 官方，主仓使用 USTC
-        write_debian_sources_deb822 "https://mirrors.ustc.edu.cn/debian" "https://security.debian.org/debian-security"
-        echo -e "${Green}Debian 已切换为 Deb822 源配置（主仓 USTC，安全仓官方）。${Font}"
-    elif [ "$OS" = "ubuntu" ]; then
-        # 检测是否使用 Deb822 格式（Ubuntu 24.04+）
-        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-            # 使用 Deb822 格式
-            write_ubuntu_sources_deb822 "https://mirrors.ustc.edu.cn/ubuntu" "https://mirrors.ustc.edu.cn/ubuntu"
-            echo -e "${Green}Ubuntu 已切换为 Deb822 源配置（USTC 镜像）。${Font}"
-        else
-            # 传统格式（旧版本 Ubuntu）
-            if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ]; then
-                cp /etc/apt/sources.list /etc/apt/sources.list.bak
-                echo -e "${Green}备份原有 sources.list 至 /etc/apt/sources.list.bak${Font}"
-            fi
-
-            cat > /etc/apt/sources.list <<EOF
-# USTC Ubuntu 镜像
-deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME} main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-updates main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-backports main restricted universe multiverse
-deb https://mirrors.ustc.edu.cn/ubuntu/ ${CODENAME}-security main restricted universe multiverse
-EOF
-        fi
-    else
-        echo -e "${Red}不支持的操作系统: $OS${Font}"
-        exit 1
-    fi
+    # 安全源固定使用 Debian 官方，主仓使用 USTC
+    write_debian_sources_deb822 "https://mirrors.ustc.edu.cn/debian" "https://security.debian.org/debian-security"
+    echo -e "${Green}Debian 已切换为 Deb822 源配置（主仓 USTC，安全仓官方）。${Font}"
 
     echo -e "${Green}已切换到 USTC 镜像源（覆盖写入）${Font}"
 }
 
 # 设置国际 APT 镜像源
 set_international_mirror() {
-    if [ "$OS" = "debian" ]; then
-        echo "正在切换到 Debian 官方 Deb822 源配置..."
-        write_debian_sources_deb822 "https://deb.debian.org/debian" "https://security.debian.org/debian-security"
-        echo -e "${Green}Debian 已切换为官方 Deb822 源配置。${Font}"
-    elif [ "$OS" = "ubuntu" ]; then
-        # 检测是否使用 Deb822 格式（Ubuntu 24.04+）
-        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-            echo "正在切换到 Ubuntu 官方 Deb822 源配置..."
-            write_ubuntu_sources_deb822 "https://archive.ubuntu.com/ubuntu" "https://security.ubuntu.com/ubuntu"
-            echo -e "${Green}Ubuntu 已切换为官方 Deb822 源配置。${Font}"
-        else
-            echo "保留默认的国际 Ubuntu 镜像源..."
-        fi
-    else
-        echo "保留默认的国际镜像源..."
-    fi
+    echo "正在切换到 Debian 官方 Deb822 源配置..."
+    write_debian_sources_deb822 "https://deb.debian.org/debian" "https://security.debian.org/debian-security"
+    echo -e "${Green}Debian 已切换为官方 Deb822 源配置。${Font}"
 }
 
 # 安装 Starship
 install_starship() {
     echo "安装 Starship..."
-    # 优先尝试 APT 包（部分新版本 Debian/Ubuntu 提供）
+    # 优先尝试 APT 包（部分新版本 Debian 提供）
     if apt-get install -y -qq starship >/dev/null 2>&1; then
         echo -e "${Green}Starship 通过 APT 安装成功。版本：$(starship --version)${Font}"
         return 0
@@ -947,4 +861,6 @@ main() {
     fi
 }
 
-main
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main
+fi
