@@ -561,20 +561,6 @@ install_zsh_plugins() {
         fi
     fi
 
-    # autosuggestions 先加载；syntax-highlighting 必须放在最后。
-    if [ -f "$autosuggestions_file" ] || [ -f "$syntax_highlighting_file" ]; then
-        {
-            printf '\n%s\n' "$source_block_start"
-            if [ -f "$autosuggestions_file" ]; then
-                printf 'source "%s"\n' "$autosuggestions_file"
-            fi
-            if [ -f "$syntax_highlighting_file" ]; then
-                printf 'source "%s"\n' "$syntax_highlighting_file"
-            fi
-            printf '%s\n' "$source_block_end"
-        } >> "$zshrc_file"
-    fi
-
     # 系统包不应再作为 Oh My Zsh 插件名加载，避免重复加载或找不到 .plugin.zsh。
     if [ -d "$HOME/.oh-my-zsh" ]; then
         plugins_line_new="plugins=(git)"
@@ -599,6 +585,20 @@ install_zsh_plugins() {
         else
             echo "$plugins_line_new" >> "$zshrc_file"
         fi
+    fi
+
+    # autosuggestions 先加载；syntax-highlighting 必须放在最后。
+    if [ -f "$autosuggestions_file" ] || [ -f "$syntax_highlighting_file" ]; then
+        {
+            printf '%s\n' "$source_block_start"
+            if [ -f "$autosuggestions_file" ]; then
+                printf 'source "%s"\n' "$autosuggestions_file"
+            fi
+            if [ -f "$syntax_highlighting_file" ]; then
+                printf 'source "%s"\n' "$syntax_highlighting_file"
+            fi
+            printf '%s\n' "$source_block_end"
+        } >> "$zshrc_file"
     fi
 
     echo -e "${Green}zsh 插件配置完成。${Font}"
