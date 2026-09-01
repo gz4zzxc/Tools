@@ -522,97 +522,91 @@ install_oh_my_zsh() {
 
 # 安装并启用常用 zsh 插件
 install_zsh_plugins() {
-    echo "安装 zsh 插件..."
+    echo "配置 zsh 插件..."
 
-    if [ ! -d "$HOME/.oh-my-zsh" ]; then
-        echo -e "${Yellow}未检测到 oh-my-zsh，跳过插件安装。${Font}"
-        return 0
-    fi
-
-    zsh_custom="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
-    plugins_dir="$zsh_custom/plugins"
     zshrc_file="${ZDOTDIR:-$HOME}/.zshrc"
-
-    mkdir -p "$plugins_dir"
-
-    # zsh-autosuggestions
-    if [ -d "$plugins_dir/zsh-autosuggestions/.git" ]; then
-        echo -e "${Yellow}zsh-autosuggestions 已存在，跳过克隆。${Font}"
-    else
-        if $isCN; then
-            if ! git clone -q https://gitee.com/mirrors/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions"; then
-                echo -e "${Yellow}通过 Gitee 安装 zsh-autosuggestions 失败，尝试 GitHub 源...${Font}"
-                git clone -q https://github.com/zsh-users/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions" || true
-            fi
-        else
-            if ! git clone -q https://github.com/zsh-users/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions"; then
-                echo -e "${Yellow}通过 GitHub 安装 zsh-autosuggestions 失败，尝试 Gitee 源...${Font}"
-                git clone -q https://gitee.com/mirrors/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions" || true
-            fi
-        fi
-    fi
-
-    # zsh-syntax-highlighting
-    if [ -d "$plugins_dir/zsh-syntax-highlighting/.git" ]; then
-        echo -e "${Yellow}zsh-syntax-highlighting 已存在，跳过克隆。${Font}"
-    else
-        if $isCN; then
-            if ! git clone -q https://gitee.com/mirrors/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting"; then
-                echo -e "${Yellow}通过 Gitee 安装 zsh-syntax-highlighting 失败，尝试 GitHub 源...${Font}"
-                git clone -q https://github.com/zsh-users/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting" || true
-            fi
-        else
-            if ! git clone -q https://github.com/zsh-users/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting"; then
-                echo -e "${Yellow}通过 GitHub 安装 zsh-syntax-highlighting 失败，尝试 Gitee 源...${Font}"
-                git clone -q https://gitee.com/mirrors/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting" || true
-            fi
-        fi
-    fi
+    autosuggestions_file="/usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+    syntax_highlighting_file="/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+    source_block_start="# >>> linux-alo.sh managed zsh plugin sources >>>"
+    source_block_end="# <<< linux-alo.sh managed zsh plugin sources <<<"
 
     touch "$zshrc_file"
 
-    # 只将实际存在的插件添加到配置
-    plugins_list=()
-
-    # git 是 oh-my-zsh 内置插件，始终可用
-    plugins_list+=("git")
-
-    # 只添加实际存在的插件
-    if [ -d "$plugins_dir/zsh-autosuggestions" ]; then
-        plugins_list+=("zsh-autosuggestions")
+    # 这两个系统包不是 Oh My Zsh 插件，直接加载系统安装的脚本。
+    missing_package_file=0
+    if [ ! -f "$autosuggestions_file" ]; then
+        echo -e "${Red}未找到 zsh-autosuggestions 的系统包文件：${autosuggestions_file}${Font}"
+        missing_package_file=1
+    fi
+    if [ ! -f "$syntax_highlighting_file" ]; then
+        echo -e "${Red}未找到 zsh-syntax-highlighting 的系统包文件：${syntax_highlighting_file}${Font}"
+        missing_package_file=1
+    fi
+    if [ "$missing_package_file" -eq 1 ]; then
+        return 1
     fi
 
-    if [ -d "$plugins_dir/zsh-syntax-highlighting" ]; then
-        plugins_list+=("zsh-syntax-highlighting")
-    fi
-
-    plugins_joined=$(printf '%s ' "${plugins_list[@]}")
-    plugins_joined=${plugins_joined% }
-    plugins_line_new="plugins=(${plugins_joined})"
-
-    # 确保 plugins=() 包含已安装的插件，并保持幂等与格式稳定
-    if grep -qE '^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(' "$zshrc_file"; then
+    # 删除本脚本之前写入的 source 块，保证重复执行不会累积配置。
+    if grep -qF "$source_block_start" "$zshrc_file"; then
         tmp_zshrc=$(mktemp)
-        if awk -v new_line="$plugins_line_new" '
-            BEGIN { replaced=0 }
-            /^[[:space:]]*#/ { print; next }
-            !replaced && /^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(/ {
-                print new_line
-                replaced=1
-                next
-            }
-            { print }
+        if awk -v start="$source_block_start" -v end="$source_block_end" '
+            $0 == start { skipping=1; next }
+            $0 == end { skipping=0; next }
+            !skipping { print }
         ' "$zshrc_file" > "$tmp_zshrc"; then
             mv "$tmp_zshrc" "$zshrc_file"
         else
             rm -f "$tmp_zshrc"
-            echo -e "${Yellow}更新 .zshrc 插件配置失败，保留原文件。${Font}"
+            echo -e "${Yellow}清理 .zshrc 插件配置失败，保留原文件。${Font}"
         fi
-    else
-        echo "$plugins_line_new" >> "$zshrc_file"
     fi
 
-    echo -e "${Green}zsh 插件安装并配置完成。${Font}"
+    # 在任何追加操作前，修复非空 .zshrc 缺少 EOF newline 的情况。
+    if [ -s "$zshrc_file" ] && [ "$(tail -c 1 "$zshrc_file" | wc -l)" -eq 0 ]; then
+        printf '\n' >> "$zshrc_file"
+    fi
+
+    # 系统包不应再作为 Oh My Zsh 插件名加载，避免重复加载或找不到 .plugin.zsh。
+    if [ -d "$HOME/.oh-my-zsh" ]; then
+        plugins_line_new="plugins=(git)"
+
+        if grep -qE '^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(' "$zshrc_file"; then
+            tmp_zshrc=$(mktemp)
+            if awk -v new_line="$plugins_line_new" '
+                BEGIN { replaced=0 }
+                /^[[:space:]]*#/ { print; next }
+                !replaced && /^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(/ {
+                    print new_line
+                    replaced=1
+                    next
+                }
+                { print }
+            ' "$zshrc_file" > "$tmp_zshrc"; then
+                mv "$tmp_zshrc" "$zshrc_file"
+            else
+                rm -f "$tmp_zshrc"
+                echo -e "${Yellow}更新 .zshrc 插件配置失败，保留原文件。${Font}"
+            fi
+        else
+            echo "$plugins_line_new" >> "$zshrc_file"
+        fi
+    fi
+
+    # autosuggestions 先加载；syntax-highlighting 必须放在最后。
+    if [ -f "$autosuggestions_file" ] || [ -f "$syntax_highlighting_file" ]; then
+        {
+            printf '%s\n' "$source_block_start"
+            if [ -f "$autosuggestions_file" ]; then
+                printf 'source "%s"\n' "$autosuggestions_file"
+            fi
+            if [ -f "$syntax_highlighting_file" ]; then
+                printf 'source "%s"\n' "$syntax_highlighting_file"
+            fi
+            printf '%s\n' "$source_block_end"
+        } >> "$zshrc_file"
+    fi
+
+    echo -e "${Green}zsh 插件配置完成。${Font}"
 }
 
 # 修改 SSH 配置
@@ -909,7 +903,7 @@ main() {
 
     # 安装必备软件
     echo "安装必备软件..."
-    apt-get install -y git wget vim nano zsh curl tar zip unzip sudo ca-certificates fail2ban
+    apt-get install -y git wget vim nano zsh zsh-autosuggestions zsh-syntax-highlighting curl tar zip unzip sudo ca-certificates fail2ban
 
     # 设置 Zsh 为默认终端
     echo "设置 Zsh 为默认终端..."
@@ -918,14 +912,14 @@ main() {
     # 安装 oh-my-zsh
     install_oh_my_zsh
 
-    # 安装并启用 zsh 插件
-    install_zsh_plugins
-
     # 安装 Starship
     install_starship
 
     # 配置 Starship
     configure_starship
+
+    # 安装并启用 zsh 插件
+    install_zsh_plugins
 
     # 修改 SSH 配置
     configure_ssh
