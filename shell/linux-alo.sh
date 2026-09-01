@@ -909,7 +909,7 @@ main() {
 
     # 安装必备软件
     echo "安装必备软件..."
-    apt-get install -y git wget vim nano zsh curl tar zip unzip sudo ca-certificates fail2ban
+    apt-get install -y git wget vim nano zsh zsh-autosuggestions zsh-syntax-highlighting curl tar zip unzip sudo ca-certificates fail2ban
 
     # 设置 Zsh 为默认终端
     echo "设置 Zsh 为默认终端..."
