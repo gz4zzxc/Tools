@@ -797,14 +797,38 @@ EOF
     fi
 }
 
+# 辅助函数：启动并验证 NTP 服务状态
+start_and_verify_ntp_service() {
+    local service_name="$1"
+    local process_name="${2:-$service_name}"
+
+    if [ -d /run/systemd/system ] || [ -n "${SYSTEMD_MOCK:-}" ]; then
+        systemctl enable --now "$service_name" >/dev/null 2>&1 || systemctl start "$service_name" >/dev/null 2>&1 || true
+        if command -v timedatectl >/dev/null 2>&1; then
+            timedatectl set-ntp true >/dev/null 2>&1 || true
+        fi
+        if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+            return 0
+        fi
+    else
+        service "$service_name" restart >/dev/null 2>&1 || /etc/init.d/"$service_name" restart >/dev/null 2>&1 || true
+        if service "$service_name" status >/dev/null 2>&1 || pgrep -x "$process_name" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 # 配置 NTP 时间同步服务
 setup_ntp() {
     echo "检查 NTP 时间同步状态..."
 
     local found_service=""
-    local ntp_services=("chrony" "chronyd" "systemd-timesyncd" "ntpsec" "ntp" "openntpd")
+    local proc_name=""
+    local ntp_services=("chrony" "chronyd" "systemd-timesyncd" "openntpd" "ntpsec" "ntp")
 
-    # 1. 检查是否有正在运行的 NTP 服务
+    # 1. 检查是否有正在运行的 NTP 服务（优先级：chrony -> timesyncd -> openntpd -> ntpsec -> ntp）
     for s in "${ntp_services[@]}"; do
         if systemctl is-active --quiet "$s" 2>/dev/null; then
             found_service="$s"
@@ -820,74 +844,87 @@ setup_ntp() {
     elif pgrep -x systemd-timesyn >/dev/null 2>&1; then
         echo -e "${Green}检测到 systemd-timesyncd 进程正在运行，跳过安装。${Font}"
         return 0
+    elif pgrep -x openntpd >/dev/null 2>&1; then
+        echo -e "${Green}检测到 openntpd 进程正在运行，跳过安装。${Font}"
+        return 0
     elif pgrep -x ntpd >/dev/null 2>&1; then
         echo -e "${Green}检测到 ntpd 进程正在运行，跳过安装。${Font}"
         return 0
     fi
 
-    # 3. 检查系统中是否已安装相关 NTP 软件包/二进制
-    if command -v chronyd >/dev/null 2>&1; then
+    # 3. 检查系统中是否已安装相关 NTP 软件包/服务单元（未处于运行态）
+    # 注意：在 Debian 11+ 中，openntpd 同时提供 /usr/sbin/openntpd 与 /usr/sbin/ntpd，因此 openntpd 必须先于通用 ntpd 检查
+    local is_systemd=0
+    if [ -d /run/systemd/system ] || [ -n "${SYSTEMD_MOCK:-}" ]; then
+        is_systemd=1
+    fi
+
+    if command -v chronyd >/dev/null 2>&1 || { [ "$is_systemd" -eq 1 ] && systemctl list-unit-files chrony.service --no-legend 2>/dev/null | grep -q '^chrony\.service'; }; then
         found_service="chrony"
-    elif [ -x /lib/systemd/systemd-timesyncd ] || [ -x /usr/lib/systemd/systemd-timesyncd ]; then
+        proc_name="chronyd"
+    elif [ -x /lib/systemd/systemd-timesyncd ] || [ -x /usr/lib/systemd/systemd-timesyncd ] || { [ "$is_systemd" -eq 1 ] && systemctl list-unit-files systemd-timesyncd.service --no-legend 2>/dev/null | grep -q '^systemd-timesyncd\.service'; }; then
         found_service="systemd-timesyncd"
-    elif command -v ntpd >/dev/null 2>&1; then
-        if systemctl list-unit-files ntpsec.service --no-legend 2>/dev/null | grep -q '^ntpsec\.service'; then
-            found_service="ntpsec"
-        else
-            found_service="ntp"
-        fi
-    elif command -v openntpd >/dev/null 2>&1; then
+        proc_name="systemd-timesyncd"
+    elif command -v openntpd >/dev/null 2>&1 || { [ "$is_systemd" -eq 1 ] && systemctl list-unit-files openntpd.service --no-legend 2>/dev/null | grep -q '^openntpd\.service'; }; then
         found_service="openntpd"
+        proc_name="openntpd"
+    elif [ "$is_systemd" -eq 1 ] && systemctl list-unit-files ntpsec.service --no-legend 2>/dev/null | grep -q '^ntpsec\.service'; then
+        found_service="ntpsec"
+        proc_name="ntpd"
+    elif [ "$is_systemd" -eq 1 ] && systemctl list-unit-files ntp.service --no-legend 2>/dev/null | grep -q '^ntp\.service'; then
+        found_service="ntp"
+        proc_name="ntpd"
+    elif command -v ntpd >/dev/null 2>&1; then
+        found_service="ntp"
+        proc_name="ntpd"
     fi
 
     if [ -n "$found_service" ]; then
         echo -e "${Yellow}检测到已安装 NTP 组件 (${found_service})，正在启用并启动服务...${Font}"
-        if [ -d /run/systemd/system ]; then
-            systemctl enable --now "$found_service" >/dev/null 2>&1 || systemctl start "$found_service" >/dev/null 2>&1 || true
-            if command -v timedatectl >/dev/null 2>&1; then
-                timedatectl set-ntp true >/dev/null 2>&1 || true
-            fi
+        if start_and_verify_ntp_service "$found_service" "$proc_name"; then
+            echo -e "${Green}${found_service} 已成功启动，跳过重复安装。${Font}"
+            return 0
         else
-            service "$found_service" restart >/dev/null 2>&1 || /etc/init.d/"$found_service" restart >/dev/null 2>&1 || true
+            echo -e "${Red}${found_service} 已安装，但启动或状态核验失败。${Font}"
+            return 1
         fi
-        echo -e "${Green}${found_service} 已启动，跳过重复安装。${Font}"
-        return 0
     fi
 
-    # 4. 检查 timedatectl NTP 是否已经同步
+    # 4. 检查 timedatectl 机器可读属性（NTPSynchronized=yes）
     if command -v timedatectl >/dev/null 2>&1; then
-        if timedatectl status 2>/dev/null | grep -qiE '(NTP service:[[:space:]]*active|System clock synchronized:[[:space:]]*yes)'; then
-            echo -e "${Green}检测到系统时钟已通过 NTP 同步，跳过安装。${Font}"
+        local sync_status
+        sync_status=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+        if [ "$sync_status" = "yes" ]; then
+            echo -e "${Green}检测到系统时钟已通过 NTP 同步 (NTPSynchronized=yes)，跳过安装。${Font}"
             return 0
         fi
     fi
 
-    # 5. 系统未检测到任何 NTP 服务，执行安装
+    # 5. 系统未检测到任何 NTP 服务，执行安装与核验
     echo "未检测到可用的 NTP 服务，正在安装 chrony..."
     if apt-get install -y chrony; then
-        if [ -d /run/systemd/system ]; then
-            systemctl enable --now chrony >/dev/null 2>&1 || systemctl start chrony >/dev/null 2>&1 || true
-            if command -v timedatectl >/dev/null 2>&1; then
-                timedatectl set-ntp true >/dev/null 2>&1 || true
-            fi
+        if start_and_verify_ntp_service "chrony" "chronyd"; then
+            echo -e "${Green}chrony 安装并启动成功，已启用网络时间同步。${Font}"
+            return 0
         else
-            service chrony restart >/dev/null 2>&1 || /etc/init.d/chrony restart >/dev/null 2>&1 || true
+            echo -e "${Yellow}chrony 软件包已安装，但启动核验失败，尝试回退到 systemd-timesyncd...${Font}"
         fi
-        echo -e "${Green}chrony 安装并启动成功，已启用网络时间同步。${Font}"
     else
         echo -e "${Yellow}chrony 安装失败，尝试回退安装 systemd-timesyncd...${Font}"
-        if apt-get install -y systemd-timesyncd; then
-            if [ -d /run/systemd/system ]; then
-                systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || systemctl start systemd-timesyncd >/dev/null 2>&1 || true
-                if command -v timedatectl >/dev/null 2>&1; then
-                    timedatectl set-ntp true >/dev/null 2>&1 || true
-                fi
-            fi
+    fi
+
+    echo "正在回退安装 systemd-timesyncd..."
+    if apt-get install -y systemd-timesyncd; then
+        if start_and_verify_ntp_service "systemd-timesyncd" "systemd-timesyncd"; then
             echo -e "${Green}systemd-timesyncd 安装并启动成功。${Font}"
+            return 0
         else
-            echo -e "${Red}NTP 服务安装失败，请手动配置时间同步。${Font}"
+            echo -e "${Red}systemd-timesyncd 软件包已安装，但启动核验失败。${Font}"
             return 1
         fi
+    else
+        echo -e "${Red}systemd-timesyncd 安装失败，所有 NTP 服务均不可用。${Font}"
+        return 1
     fi
 }
 
