@@ -169,11 +169,7 @@ EOS
     if output=$(bash -c '
         PATH="$1:$PATH"
         export PATH
-        if [ "$3" -eq 1 ]; then
-            export SYSTEMD_MOCK=1
-        else
-            unset SYSTEMD_MOCK || true
-        fi
+        export SYSTEMD_MODE_OVERRIDE="$3"
         export INIT_D_DIR="$4"
         source "$2"
         setup_ntp
@@ -280,7 +276,7 @@ verify_clean_install_chrony() {
 }
 
 # -------------------------------------------------------------
-# Case 5: chrony APT 安装失败，自动平滑回退到 systemd-timesyncd
+# Case 5: chrony APT 安装失败，在 systemd 环境平滑回退到 timesyncd
 # -------------------------------------------------------------
 setup_chrony_apt_fail_fallback() {
     local mock_bin="$1" state_dir="$2" init_d_dir="$3"
@@ -294,7 +290,7 @@ verify_chrony_apt_fail_fallback() {
 }
 
 # -------------------------------------------------------------
-# Case 6: chrony APT 安装成功但启动核验失败，平滑回退到 timesyncd
+# Case 6: chrony APT 成功但拉起核验失败，在 systemd 环境回退到 timesyncd
 # -------------------------------------------------------------
 setup_chrony_start_fail_fallback() {
     local mock_bin="$1" state_dir="$2" init_d_dir="$3"
@@ -309,7 +305,7 @@ verify_chrony_start_fail_fallback() {
 }
 
 # -------------------------------------------------------------
-# Case 7: 全部失败时坚决返回退出码 1
+# Case 7: systemd 环境下所有服务安装/启动均失败时退出码 1
 # -------------------------------------------------------------
 setup_all_failed() {
     local mock_bin="$1" state_dir="$2" init_d_dir="$3"
@@ -339,14 +335,11 @@ verify_timedatectl_synced() {
 # -------------------------------------------------------------
 setup_inactive_ntpsec_non_systemd() {
     local mock_bin="$1" state_dir="$2" init_d_dir="$3"
-    # 创建 /etc/init.d/ntpsec 模拟脚本
     cat > "$init_d_dir/ntpsec" <<'EOS'
 #!/bin/sh
 exit 0
 EOS
     chmod +x "$init_d_dir/ntpsec"
-
-    # 系统同时存在 ntpd 命令（Debian ntpsec 包提供）
     cat > "$mock_bin/ntpd" <<'EOS'
 #!/bin/sh
 exit 0
@@ -355,13 +348,25 @@ EOS
 }
 verify_inactive_ntpsec_non_systemd() {
     local calls_log="$1" state_dir="$2"
-    # 必须通过 service ntpsec 启动，绝不能尝试 service ntp
     grep -q "service ntpsec restart" "$calls_log" && \
     ! grep -q "service ntp " "$calls_log" && \
     ! grep -q "apt-get" "$calls_log"
 }
 
-# 运行所有用例
+# -------------------------------------------------------------
+# Case 10: [非 systemd 环境] chrony 失败严禁回退到 timesyncd，直接阻断
+# -------------------------------------------------------------
+setup_non_systemd_chrony_fail_no_timesyncd() {
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
+    touch "$state_dir/fail_apt_chrony"
+}
+verify_non_systemd_chrony_fail_no_timesyncd() {
+    local calls_log="$1" state_dir="$2"
+    grep -q "apt-get install -y chrony" "$calls_log" && \
+    ! grep -q "systemd-timesyncd" "$calls_log"
+}
+
+# 运行所有用例（指定 systemd_mode: 1 或 0）
 run_case "active_service" 0 "正在运行 (chrony)" "" 1 setup_active_chrony verify_active_chrony
 run_case "inactive_openntpd" 0 "openntpd 已成功启动" "ntp 已成功启动" 1 setup_inactive_openntpd verify_inactive_openntpd
 run_case "start_failure_aborts" 1 "已安装，但启动或状态核验失败" "已成功启动" 1 setup_start_failure verify_start_failure
@@ -371,5 +376,6 @@ run_case "chrony_start_fail_fallback" 0 "systemd-timesyncd 安装并启动成功
 run_case "all_failed_aborts" 1 "所有 NTP 服务均不可用" "已成功启动" 1 setup_all_failed verify_all_failed
 run_case "timedatectl_synced" 0 "NTPSynchronized=yes" "" 1 setup_timedatectl_synced verify_timedatectl_synced
 run_case "inactive_ntpsec_non_systemd" 0 "ntpsec 已成功启动" "ntp 已成功启动" 0 setup_inactive_ntpsec_non_systemd verify_inactive_ntpsec_non_systemd
+run_case "non_systemd_chrony_fail_no_timesyncd" 1 "非 systemd 环境不支持回退到 systemd-timesyncd" "正在回退安装 systemd-timesyncd" 0 setup_non_systemd_chrony_fail_no_timesyncd verify_non_systemd_chrony_fail_no_timesyncd
 
 printf '\nAll setup_ntp behavioral test cases passed successfully!\n'
