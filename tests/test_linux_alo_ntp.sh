@@ -11,19 +11,21 @@ run_case() {
     local expected_status="$2"
     local expected_output_pattern="$3"
     local unexpected_output_pattern="$4"
-    local setup_fn="$5"
-    local verify_fn="$6"
+    local systemd_mode="$5" # 1: systemd, 0: non-systemd
+    local setup_fn="$6"
+    local verify_fn="$7"
 
     local case_dir="$test_root/$case_name"
     local mock_bin="$case_dir/bin"
     local state_dir="$case_dir/state"
+    local init_d_dir="$case_dir/init.d"
     local calls_log="$case_dir/calls.log"
 
-    mkdir -p "$mock_bin" "$state_dir"
+    mkdir -p "$mock_bin" "$state_dir" "$init_d_dir"
     touch "$calls_log"
 
     # 执行测试用例的前置环境配置
-    "$setup_fn" "$mock_bin" "$state_dir"
+    "$setup_fn" "$mock_bin" "$state_dir" "$init_d_dir"
 
     # 创建标准 mock: systemctl
     cat > "$mock_bin/systemctl" <<EOS
@@ -53,7 +55,6 @@ case "\$action" in
         fi
         ;;
     list-unit-files)
-        # 支持匹配 unit_*.service
         unit="\${target%%.service}.service"
         if [ -n "\$unit" ] && [ -f "\$state_dir/unit_\$unit" ]; then
             echo "\$unit enabled"
@@ -79,6 +80,38 @@ esac
 EOS
     chmod +x "$mock_bin/systemctl"
 
+    # 创建标准 mock: service (用于非 systemd 环境)
+    cat > "$mock_bin/service" <<EOS
+#!/usr/bin/env bash
+set -eu
+echo "service \$*" >> "$calls_log"
+state_dir="$state_dir"
+
+service="\$1"
+action="\$2"
+
+case "\$action" in
+    status)
+        if [ -f "\$state_dir/active_\$service" ]; then
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    restart|start)
+        if [ -f "\$state_dir/fail_start_\$service" ]; then
+            exit 1
+        fi
+        touch "\$state_dir/active_\$service"
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+EOS
+    chmod +x "$mock_bin/service"
+
     # 创建标准 mock: timedatectl
     cat > "$mock_bin/timedatectl" <<EOS
 #!/usr/bin/env bash
@@ -98,7 +131,7 @@ exit 0
 EOS
     chmod +x "$mock_bin/timedatectl"
 
-    # 创建标准 mock: apt-get
+    # 创建标准 mock: apt-get (安装包只创建 unit，不伪造 active 状态)
     cat > "$mock_bin/apt-get" <<EOS
 #!/usr/bin/env bash
 set -eu
@@ -111,9 +144,6 @@ if [ -f "\$state_dir/fail_apt_\$pkg" ]; then
 fi
 
 touch "\$state_dir/unit_\${pkg}.service"
-if [ ! -f "\$state_dir/fail_start_\${pkg}" ]; then
-    touch "\$state_dir/active_\${pkg}"
-fi
 exit 0
 EOS
     chmod +x "$mock_bin/apt-get"
@@ -139,10 +169,15 @@ EOS
     if output=$(bash -c '
         PATH="$1:$PATH"
         export PATH
-        export SYSTEMD_MOCK=1
+        if [ "$3" -eq 1 ]; then
+            export SYSTEMD_MOCK=1
+        else
+            unset SYSTEMD_MOCK || true
+        fi
+        export INIT_D_DIR="$4"
         source "$2"
         setup_ntp
-    ' bash "$mock_bin" "$script_path" 2>&1); then
+    ' bash "$mock_bin" "$script_path" "$systemd_mode" "$init_d_dir" 2>&1); then
         status=0
     else
         status=$?
@@ -179,7 +214,7 @@ EOS
 # Case 1: 服务正在运行 (Active Service)
 # -------------------------------------------------------------
 setup_active_chrony() {
-    local mock_bin="$1" state_dir="$2"
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
     touch "$state_dir/active_chrony"
 }
 verify_active_chrony() {
@@ -191,9 +226,8 @@ verify_active_chrony() {
 # Case 2: Inactive OpenNTPd 正确判型，绝不误判为 ntp
 # -------------------------------------------------------------
 setup_inactive_openntpd() {
-    local mock_bin="$1" state_dir="$2"
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
     touch "$state_dir/unit_openntpd.service"
-    # 同时提供 openntpd 和 ntpd 两个二进制
     cat > "$mock_bin/openntpd" <<'EOS'
 #!/bin/sh
 exit 0
@@ -207,7 +241,6 @@ EOS
 }
 verify_inactive_openntpd() {
     local calls_log="$1" state_dir="$2"
-    # 必须启动 openntpd，绝不能启动 ntp
     grep -q "systemctl enable --now openntpd" "$calls_log" && \
     ! grep -q "enable --now ntp" "$calls_log" && \
     ! grep -q "apt-get" "$calls_log"
@@ -217,7 +250,7 @@ verify_inactive_openntpd() {
 # Case 3: 已装组件启动核验失败，必须阻断报错，不得谎报成功
 # -------------------------------------------------------------
 setup_start_failure() {
-    local mock_bin="$1" state_dir="$2"
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
     touch "$state_dir/unit_chrony.service"
     touch "$state_dir/fail_start_chrony"
     cat > "$mock_bin/chronyd" <<'EOS'
@@ -236,7 +269,7 @@ verify_start_failure() {
 # Case 4: 干净环境无 NTP，成功安装并启动 chrony
 # -------------------------------------------------------------
 setup_clean_install_chrony() {
-    local mock_bin="$1" state_dir="$2"
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
     # 无任何已存在 unit
 }
 verify_clean_install_chrony() {
@@ -247,13 +280,13 @@ verify_clean_install_chrony() {
 }
 
 # -------------------------------------------------------------
-# Case 5: chrony 失败，自动平滑回退到 systemd-timesyncd
+# Case 5: chrony APT 安装失败，自动平滑回退到 systemd-timesyncd
 # -------------------------------------------------------------
-setup_chrony_fallback() {
-    local mock_bin="$1" state_dir="$2"
+setup_chrony_apt_fail_fallback() {
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
     touch "$state_dir/fail_apt_chrony"
 }
-verify_chrony_fallback() {
+verify_chrony_apt_fail_fallback() {
     local calls_log="$1" state_dir="$2"
     grep -q "apt-get install -y chrony" "$calls_log" && \
     grep -q "apt-get install -y systemd-timesyncd" "$calls_log" && \
@@ -261,10 +294,25 @@ verify_chrony_fallback() {
 }
 
 # -------------------------------------------------------------
-# Case 6: 全部失败时坚决返回退出码 1
+# Case 6: chrony APT 安装成功但启动核验失败，平滑回退到 timesyncd
+# -------------------------------------------------------------
+setup_chrony_start_fail_fallback() {
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
+    touch "$state_dir/fail_start_chrony"
+}
+verify_chrony_start_fail_fallback() {
+    local calls_log="$1" state_dir="$2"
+    grep -q "apt-get install -y chrony" "$calls_log" && \
+    grep -q "systemctl enable --now chrony" "$calls_log" && \
+    grep -q "apt-get install -y systemd-timesyncd" "$calls_log" && \
+    grep -q "systemctl enable --now systemd-timesyncd" "$calls_log"
+}
+
+# -------------------------------------------------------------
+# Case 7: 全部失败时坚决返回退出码 1
 # -------------------------------------------------------------
 setup_all_failed() {
-    local mock_bin="$1" state_dir="$2"
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
     touch "$state_dir/fail_apt_chrony"
     touch "$state_dir/fail_apt_systemd-timesyncd"
 }
@@ -275,10 +323,10 @@ verify_all_failed() {
 }
 
 # -------------------------------------------------------------
-# Case 7: timedatectl show NTPSynchronized=yes 时跳过安装
+# Case 8: timedatectl show NTPSynchronized=yes 时跳过安装
 # -------------------------------------------------------------
 setup_timedatectl_synced() {
-    local mock_bin="$1" state_dir="$2"
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
     touch "$state_dir/ntp_synchronized"
 }
 verify_timedatectl_synced() {
@@ -286,13 +334,42 @@ verify_timedatectl_synced() {
     ! grep -q "apt-get" "$calls_log"
 }
 
+# -------------------------------------------------------------
+# Case 9: [非 systemd 环境] inactive NTPsec 正确判型并启动成功
+# -------------------------------------------------------------
+setup_inactive_ntpsec_non_systemd() {
+    local mock_bin="$1" state_dir="$2" init_d_dir="$3"
+    # 创建 /etc/init.d/ntpsec 模拟脚本
+    cat > "$init_d_dir/ntpsec" <<'EOS'
+#!/bin/sh
+exit 0
+EOS
+    chmod +x "$init_d_dir/ntpsec"
+
+    # 系统同时存在 ntpd 命令（Debian ntpsec 包提供）
+    cat > "$mock_bin/ntpd" <<'EOS'
+#!/bin/sh
+exit 0
+EOS
+    chmod +x "$mock_bin/ntpd"
+}
+verify_inactive_ntpsec_non_systemd() {
+    local calls_log="$1" state_dir="$2"
+    # 必须通过 service ntpsec 启动，绝不能尝试 service ntp
+    grep -q "service ntpsec restart" "$calls_log" && \
+    ! grep -q "service ntp " "$calls_log" && \
+    ! grep -q "apt-get" "$calls_log"
+}
+
 # 运行所有用例
-run_case "active_service" 0 "正在运行 (chrony)" "" setup_active_chrony verify_active_chrony
-run_case "inactive_openntpd" 0 "openntpd 已成功启动" "ntp 已成功启动" setup_inactive_openntpd verify_inactive_openntpd
-run_case "start_failure_aborts" 1 "已安装，但启动或状态核验失败" "已成功启动" setup_start_failure verify_start_failure
-run_case "clean_install_chrony" 0 "chrony 安装并启动成功" "" setup_clean_install_chrony verify_clean_install_chrony
-run_case "chrony_fallback_timesyncd" 0 "systemd-timesyncd 安装并启动成功" "" setup_chrony_fallback verify_chrony_fallback
-run_case "all_failed_aborts" 1 "所有 NTP 服务均不可用" "已成功启动" setup_all_failed verify_all_failed
-run_case "timedatectl_synced" 0 "NTPSynchronized=yes" "" setup_timedatectl_synced verify_timedatectl_synced
+run_case "active_service" 0 "正在运行 (chrony)" "" 1 setup_active_chrony verify_active_chrony
+run_case "inactive_openntpd" 0 "openntpd 已成功启动" "ntp 已成功启动" 1 setup_inactive_openntpd verify_inactive_openntpd
+run_case "start_failure_aborts" 1 "已安装，但启动或状态核验失败" "已成功启动" 1 setup_start_failure verify_start_failure
+run_case "clean_install_chrony" 0 "chrony 安装并启动成功" "" 1 setup_clean_install_chrony verify_clean_install_chrony
+run_case "chrony_apt_fail_fallback" 0 "systemd-timesyncd 安装并启动成功" "" 1 setup_chrony_apt_fail_fallback verify_chrony_apt_fail_fallback
+run_case "chrony_start_fail_fallback" 0 "systemd-timesyncd 安装并启动成功" "" 1 setup_chrony_start_fail_fallback verify_chrony_start_fail_fallback
+run_case "all_failed_aborts" 1 "所有 NTP 服务均不可用" "已成功启动" 1 setup_all_failed verify_all_failed
+run_case "timedatectl_synced" 0 "NTPSynchronized=yes" "" 1 setup_timedatectl_synced verify_timedatectl_synced
+run_case "inactive_ntpsec_non_systemd" 0 "ntpsec 已成功启动" "ntp 已成功启动" 0 setup_inactive_ntpsec_non_systemd verify_inactive_ntpsec_non_systemd
 
 printf '\nAll setup_ntp behavioral test cases passed successfully!\n'

@@ -801,6 +801,7 @@ EOF
 start_and_verify_ntp_service() {
     local service_name="$1"
     local process_name="${2:-$service_name}"
+    local init_d_dir="${INIT_D_DIR:-/etc/init.d}"
 
     if [ -d /run/systemd/system ] || [ -n "${SYSTEMD_MOCK:-}" ]; then
         systemctl enable --now "$service_name" >/dev/null 2>&1 || systemctl start "$service_name" >/dev/null 2>&1 || true
@@ -811,7 +812,7 @@ start_and_verify_ntp_service() {
             return 0
         fi
     else
-        service "$service_name" restart >/dev/null 2>&1 || /etc/init.d/"$service_name" restart >/dev/null 2>&1 || true
+        service "$service_name" restart >/dev/null 2>&1 || "$init_d_dir/$service_name" restart >/dev/null 2>&1 || true
         if service "$service_name" status >/dev/null 2>&1 || pgrep -x "$process_name" >/dev/null 2>&1; then
             return 0
         fi
@@ -853,30 +854,45 @@ setup_ntp() {
     fi
 
     # 3. 检查系统中是否已安装相关 NTP 软件包/服务单元（未处于运行态）
-    # 注意：在 Debian 11+ 中，openntpd 同时提供 /usr/sbin/openntpd 与 /usr/sbin/ntpd，因此 openntpd 必须先于通用 ntpd 检查
     local is_systemd=0
     if [ -d /run/systemd/system ] || [ -n "${SYSTEMD_MOCK:-}" ]; then
         is_systemd=1
     fi
 
-    if command -v chronyd >/dev/null 2>&1 || { [ "$is_systemd" -eq 1 ] && systemctl list-unit-files chrony.service --no-legend 2>/dev/null | grep -q '^chrony\.service'; }; then
-        found_service="chrony"
-        proc_name="chronyd"
-    elif [ -x /lib/systemd/systemd-timesyncd ] || [ -x /usr/lib/systemd/systemd-timesyncd ] || { [ "$is_systemd" -eq 1 ] && systemctl list-unit-files systemd-timesyncd.service --no-legend 2>/dev/null | grep -q '^systemd-timesyncd\.service'; }; then
-        found_service="systemd-timesyncd"
-        proc_name="systemd-timesyncd"
-    elif command -v openntpd >/dev/null 2>&1 || { [ "$is_systemd" -eq 1 ] && systemctl list-unit-files openntpd.service --no-legend 2>/dev/null | grep -q '^openntpd\.service'; }; then
-        found_service="openntpd"
-        proc_name="openntpd"
-    elif [ "$is_systemd" -eq 1 ] && systemctl list-unit-files ntpsec.service --no-legend 2>/dev/null | grep -q '^ntpsec\.service'; then
-        found_service="ntpsec"
-        proc_name="ntpd"
-    elif [ "$is_systemd" -eq 1 ] && systemctl list-unit-files ntp.service --no-legend 2>/dev/null | grep -q '^ntp\.service'; then
-        found_service="ntp"
-        proc_name="ntpd"
-    elif command -v ntpd >/dev/null 2>&1; then
-        found_service="ntp"
-        proc_name="ntpd"
+    if [ "$is_systemd" -eq 1 ]; then
+        # systemd 环境：依据 unit 文件及特异性 binary 判型
+        if systemctl list-unit-files chrony.service --no-legend 2>/dev/null | grep -q '^chrony\.service' || command -v chronyd >/dev/null 2>&1; then
+            found_service="chrony"
+            proc_name="chronyd"
+        elif systemctl list-unit-files systemd-timesyncd.service --no-legend 2>/dev/null | grep -q '^systemd-timesyncd\.service' || [ -x /lib/systemd/systemd-timesyncd ] || [ -x /usr/lib/systemd/systemd-timesyncd ]; then
+            found_service="systemd-timesyncd"
+            proc_name="systemd-timesyncd"
+        elif systemctl list-unit-files openntpd.service --no-legend 2>/dev/null | grep -q '^openntpd\.service' || command -v openntpd >/dev/null 2>&1; then
+            found_service="openntpd"
+            proc_name="openntpd"
+        elif systemctl list-unit-files ntpsec.service --no-legend 2>/dev/null | grep -q '^ntpsec\.service'; then
+            found_service="ntpsec"
+            proc_name="ntpd"
+        elif systemctl list-unit-files ntp.service --no-legend 2>/dev/null | grep -q '^ntp\.service'; then
+            found_service="ntp"
+            proc_name="ntpd"
+        fi
+    else
+        # 非 systemd 环境：依据 SysV init 脚本及特异性 binary 判型，绝不以裸 ntpd 混淆 ntpsec 与 ntp
+        local init_d_dir="${INIT_D_DIR:-/etc/init.d}"
+        if [ -x "$init_d_dir/chrony" ] || command -v chronyd >/dev/null 2>&1; then
+            found_service="chrony"
+            proc_name="chronyd"
+        elif [ -x "$init_d_dir/openntpd" ] || command -v openntpd >/dev/null 2>&1; then
+            found_service="openntpd"
+            proc_name="openntpd"
+        elif [ -x "$init_d_dir/ntpsec" ]; then
+            found_service="ntpsec"
+            proc_name="ntpd"
+        elif [ -x "$init_d_dir/ntp" ]; then
+            found_service="ntp"
+            proc_name="ntpd"
+        fi
     fi
 
     if [ -n "$found_service" ]; then
