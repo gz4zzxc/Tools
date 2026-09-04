@@ -797,6 +797,100 @@ EOF
     fi
 }
 
+# 配置 NTP 时间同步服务
+setup_ntp() {
+    echo "检查 NTP 时间同步状态..."
+
+    local found_service=""
+    local ntp_services=("chrony" "chronyd" "systemd-timesyncd" "ntpsec" "ntp" "openntpd")
+
+    # 1. 检查是否有正在运行的 NTP 服务
+    for s in "${ntp_services[@]}"; do
+        if systemctl is-active --quiet "$s" 2>/dev/null; then
+            found_service="$s"
+            echo -e "${Green}检测到 NTP 服务正在运行 (${found_service})，跳过安装。${Font}"
+            return 0
+        fi
+    done
+
+    # 2. 检查守护进程是否在运行（覆盖非 systemd 容器或环境）
+    if pgrep -x chronyd >/dev/null 2>&1; then
+        echo -e "${Green}检测到 chronyd 进程正在运行，跳过安装。${Font}"
+        return 0
+    elif pgrep -x systemd-timesyn >/dev/null 2>&1; then
+        echo -e "${Green}检测到 systemd-timesyncd 进程正在运行，跳过安装。${Font}"
+        return 0
+    elif pgrep -x ntpd >/dev/null 2>&1; then
+        echo -e "${Green}检测到 ntpd 进程正在运行，跳过安装。${Font}"
+        return 0
+    fi
+
+    # 3. 检查系统中是否已安装相关 NTP 软件包/二进制
+    if command -v chronyd >/dev/null 2>&1; then
+        found_service="chrony"
+    elif [ -x /lib/systemd/systemd-timesyncd ] || [ -x /usr/lib/systemd/systemd-timesyncd ]; then
+        found_service="systemd-timesyncd"
+    elif command -v ntpd >/dev/null 2>&1; then
+        if systemctl list-unit-files ntpsec.service --no-legend 2>/dev/null | grep -q '^ntpsec\.service'; then
+            found_service="ntpsec"
+        else
+            found_service="ntp"
+        fi
+    elif command -v openntpd >/dev/null 2>&1; then
+        found_service="openntpd"
+    fi
+
+    if [ -n "$found_service" ]; then
+        echo -e "${Yellow}检测到已安装 NTP 组件 (${found_service})，正在启用并启动服务...${Font}"
+        if [ -d /run/systemd/system ]; then
+            systemctl enable --now "$found_service" >/dev/null 2>&1 || systemctl start "$found_service" >/dev/null 2>&1 || true
+            if command -v timedatectl >/dev/null 2>&1; then
+                timedatectl set-ntp true >/dev/null 2>&1 || true
+            fi
+        else
+            service "$found_service" restart >/dev/null 2>&1 || /etc/init.d/"$found_service" restart >/dev/null 2>&1 || true
+        fi
+        echo -e "${Green}${found_service} 已启动，跳过重复安装。${Font}"
+        return 0
+    fi
+
+    # 4. 检查 timedatectl NTP 是否已经同步
+    if command -v timedatectl >/dev/null 2>&1; then
+        if timedatectl status 2>/dev/null | grep -qiE '(NTP service:[[:space:]]*active|System clock synchronized:[[:space:]]*yes)'; then
+            echo -e "${Green}检测到系统时钟已通过 NTP 同步，跳过安装。${Font}"
+            return 0
+        fi
+    fi
+
+    # 5. 系统未检测到任何 NTP 服务，执行安装
+    echo "未检测到可用的 NTP 服务，正在安装 chrony..."
+    if apt-get install -y chrony; then
+        if [ -d /run/systemd/system ]; then
+            systemctl enable --now chrony >/dev/null 2>&1 || systemctl start chrony >/dev/null 2>&1 || true
+            if command -v timedatectl >/dev/null 2>&1; then
+                timedatectl set-ntp true >/dev/null 2>&1 || true
+            fi
+        else
+            service chrony restart >/dev/null 2>&1 || /etc/init.d/chrony restart >/dev/null 2>&1 || true
+        fi
+        echo -e "${Green}chrony 安装并启动成功，已启用网络时间同步。${Font}"
+    else
+        echo -e "${Yellow}chrony 安装失败，尝试回退安装 systemd-timesyncd...${Font}"
+        if apt-get install -y systemd-timesyncd; then
+            if [ -d /run/systemd/system ]; then
+                systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || systemctl start systemd-timesyncd >/dev/null 2>&1 || true
+                if command -v timedatectl >/dev/null 2>&1; then
+                    timedatectl set-ntp true >/dev/null 2>&1 || true
+                fi
+            fi
+            echo -e "${Green}systemd-timesyncd 安装并启动成功。${Font}"
+        else
+            echo -e "${Red}NTP 服务安装失败，请手动配置时间同步。${Font}"
+            return 1
+        fi
+    fi
+}
+
 # 主函数
 main() {
     check_root
@@ -818,6 +912,9 @@ main() {
     # 安装必备软件
     echo "安装必备软件..."
     apt-get install -y git wget vim nano zsh zsh-autosuggestions zsh-syntax-highlighting curl tar zip unzip sudo ca-certificates fail2ban
+
+    # 配置 NTP 时间同步
+    setup_ntp
 
     # 设置 Zsh 为默认终端
     echo "设置 Zsh 为默认终端..."
