@@ -874,7 +874,7 @@ setup_ntp() {
         if systemctl list-unit-files chrony.service --no-legend 2>/dev/null | grep -q '^chrony\.service' || command -v chronyd >/dev/null 2>&1; then
             found_service="chrony"
             proc_name="chronyd"
-        elif systemctl list-unit-files systemd-timesyncd.service --no-legend 2>/dev/null | grep -q '^systemd-timesyncd\.service' || [ -x /lib/systemd/systemd-timesyncd ] || [ -x /usr/lib/systemd/systemd-timesyncd ]; then
+        elif systemctl list-unit-files systemd-timesyncd.service --no-legend 2>/dev/null | grep -q '^systemd-timesyncd\.service'; then
             found_service="systemd-timesyncd"
             proc_name="systemd-timesyncd"
         elif systemctl list-unit-files openntpd.service --no-legend 2>/dev/null | grep -q '^openntpd\.service' || command -v openntpd >/dev/null 2>&1; then

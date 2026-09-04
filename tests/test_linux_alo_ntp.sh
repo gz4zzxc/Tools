@@ -167,7 +167,7 @@ EOS
     local status=0
 
     if output=$(bash -c '
-        PATH="$1:$PATH"
+        PATH="$1:/usr/bin:/bin"
         export PATH
         export SYSTEMD_MODE_OVERRIDE="$3"
         export INIT_D_DIR="$4"
