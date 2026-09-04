@@ -797,6 +797,169 @@ EOF
     fi
 }
 
+# 辅助函数：检测是否以 systemd 启动（支持通过 SYSTEMD_MODE_OVERRIDE 环境变量进行沙箱测试）
+is_systemd_booted() {
+    case "${SYSTEMD_MODE_OVERRIDE:-auto}" in
+        1) return 0 ;;
+        0) return 1 ;;
+        *) [ -d /run/systemd/system ] ;;
+    esac
+}
+
+# 辅助函数：启动并验证 NTP 服务状态
+start_and_verify_ntp_service() {
+    local service_name="$1"
+    local process_name="${2:-$service_name}"
+    local init_d_dir="${INIT_D_DIR:-/etc/init.d}"
+
+    if is_systemd_booted; then
+        systemctl enable --now "$service_name" >/dev/null 2>&1 || systemctl start "$service_name" >/dev/null 2>&1 || true
+        if command -v timedatectl >/dev/null 2>&1; then
+            timedatectl set-ntp true >/dev/null 2>&1 || true
+        fi
+        if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+            return 0
+        fi
+    else
+        service "$service_name" restart >/dev/null 2>&1 || "$init_d_dir/$service_name" restart >/dev/null 2>&1 || true
+        if service "$service_name" status >/dev/null 2>&1 || pgrep -x "$process_name" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# 配置 NTP 时间同步服务
+setup_ntp() {
+    echo "检查 NTP 时间同步状态..."
+
+    local found_service=""
+    local proc_name=""
+    local ntp_services=("chrony" "chronyd" "systemd-timesyncd" "openntpd" "ntpsec" "ntp")
+    local is_systemd=0
+    if is_systemd_booted; then
+        is_systemd=1
+    fi
+
+    # 1. 检查是否有正在运行的 NTP 服务（优先级：chrony -> timesyncd -> openntpd -> ntpsec -> ntp）
+    if [ "$is_systemd" -eq 1 ]; then
+        for s in "${ntp_services[@]}"; do
+            if systemctl is-active --quiet "$s" 2>/dev/null; then
+                found_service="$s"
+                echo -e "${Green}检测到 NTP 服务正在运行 (${found_service})，跳过安装。${Font}"
+                return 0
+            fi
+        done
+    fi
+
+    # 2. 检查守护进程是否在运行（覆盖非 systemd 容器或环境）
+    if pgrep -x chronyd >/dev/null 2>&1; then
+        echo -e "${Green}检测到 chronyd 进程正在运行，跳过安装。${Font}"
+        return 0
+    elif pgrep -x systemd-timesyn >/dev/null 2>&1; then
+        echo -e "${Green}检测到 systemd-timesyncd 进程正在运行，跳过安装。${Font}"
+        return 0
+    elif pgrep -x openntpd >/dev/null 2>&1; then
+        echo -e "${Green}检测到 openntpd 进程正在运行，跳过安装。${Font}"
+        return 0
+    elif pgrep -x ntpd >/dev/null 2>&1; then
+        echo -e "${Green}检测到 ntpd 进程正在运行，跳过安装。${Font}"
+        return 0
+    fi
+
+    # 3. 检查系统中是否已安装相关 NTP 软件包/服务单元（未处于运行态）
+    if [ "$is_systemd" -eq 1 ]; then
+        # systemd 环境：依据 unit 文件及特异性 binary 判型
+        if systemctl list-unit-files chrony.service --no-legend 2>/dev/null | grep -q '^chrony\.service' || command -v chronyd >/dev/null 2>&1; then
+            found_service="chrony"
+            proc_name="chronyd"
+        elif systemctl list-unit-files systemd-timesyncd.service --no-legend 2>/dev/null | grep -q '^systemd-timesyncd\.service'; then
+            found_service="systemd-timesyncd"
+            proc_name="systemd-timesyncd"
+        elif systemctl list-unit-files openntpd.service --no-legend 2>/dev/null | grep -q '^openntpd\.service' || command -v openntpd >/dev/null 2>&1; then
+            found_service="openntpd"
+            proc_name="openntpd"
+        elif systemctl list-unit-files ntpsec.service --no-legend 2>/dev/null | grep -q '^ntpsec\.service'; then
+            found_service="ntpsec"
+            proc_name="ntpd"
+        elif systemctl list-unit-files ntp.service --no-legend 2>/dev/null | grep -q '^ntp\.service'; then
+            found_service="ntp"
+            proc_name="ntpd"
+        fi
+    else
+        # 非 systemd 环境：依据 SysV init 脚本及特异性 binary 判型，绝不以裸 ntpd 混淆 ntpsec 与 ntp
+        local init_d_dir="${INIT_D_DIR:-/etc/init.d}"
+        if [ -x "$init_d_dir/chrony" ] || command -v chronyd >/dev/null 2>&1; then
+            found_service="chrony"
+            proc_name="chronyd"
+        elif [ -x "$init_d_dir/openntpd" ] || command -v openntpd >/dev/null 2>&1; then
+            found_service="openntpd"
+            proc_name="openntpd"
+        elif [ -x "$init_d_dir/ntpsec" ]; then
+            found_service="ntpsec"
+            proc_name="ntpd"
+        elif [ -x "$init_d_dir/ntp" ]; then
+            found_service="ntp"
+            proc_name="ntpd"
+        fi
+    fi
+
+    if [ -n "$found_service" ]; then
+        echo -e "${Yellow}检测到已安装 NTP 组件 (${found_service})，正在启用并启动服务...${Font}"
+        if start_and_verify_ntp_service "$found_service" "$proc_name"; then
+            echo -e "${Green}${found_service} 已成功启动，跳过重复安装。${Font}"
+            return 0
+        else
+            echo -e "${Red}${found_service} 已安装，但启动或状态核验失败。${Font}"
+            return 1
+        fi
+    fi
+
+    # 4. 检查 timedatectl 机器可读属性（NTPSynchronized=yes）
+    if command -v timedatectl >/dev/null 2>&1; then
+        local sync_status
+        sync_status=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+        if [ "$sync_status" = "yes" ]; then
+            echo -e "${Green}检测到系统时钟已通过 NTP 同步 (NTPSynchronized=yes)，跳过安装。${Font}"
+            return 0
+        fi
+    fi
+
+    # 5. 系统未检测到任何 NTP 服务，执行安装与核验
+    echo "未检测到可用的 NTP 服务，正在安装 chrony..."
+    if apt-get install -y chrony; then
+        if start_and_verify_ntp_service "chrony" "chronyd"; then
+            echo -e "${Green}chrony 安装并启动成功，已启用网络时间同步。${Font}"
+            return 0
+        else
+            echo -e "${Yellow}chrony 软件包已安装，但启动核验失败。${Font}"
+        fi
+    else
+        echo -e "${Yellow}chrony 安装失败。${Font}"
+    fi
+
+    # 仅在 systemd 环境下尝试回退安装 systemd-timesyncd（timesyncd 强依赖 systemd）
+    if [ "$is_systemd" -eq 1 ]; then
+        echo "正在回退安装 systemd-timesyncd..."
+        if apt-get install -y systemd-timesyncd; then
+            if start_and_verify_ntp_service "systemd-timesyncd" "systemd-timesyncd"; then
+                echo -e "${Green}systemd-timesyncd 安装并启动成功。${Font}"
+                return 0
+            else
+                echo -e "${Red}systemd-timesyncd 软件包已安装，但启动核验失败。${Font}"
+                return 1
+            fi
+        else
+            echo -e "${Red}systemd-timesyncd 安装失败，所有 NTP 服务均不可用。${Font}"
+            return 1
+        fi
+    else
+        echo -e "${Red}非 systemd 环境不支持回退到 systemd-timesyncd，NTP 服务配置失败。${Font}"
+        return 1
+    fi
+}
+
 # 主函数
 main() {
     check_root
@@ -818,6 +981,9 @@ main() {
     # 安装必备软件
     echo "安装必备软件..."
     apt-get install -y git wget vim nano zsh zsh-autosuggestions zsh-syntax-highlighting curl tar zip unzip sudo ca-certificates fail2ban
+
+    # 配置 NTP 时间同步
+    setup_ntp
 
     # 设置 Zsh 为默认终端
     echo "设置 Zsh 为默认终端..."
