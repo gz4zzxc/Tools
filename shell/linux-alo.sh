@@ -715,33 +715,125 @@ setup_swap() {
 enable_bbr() {
     echo "开启 BBR..."
 
+    local sysctl_conf="${BBR_SYSCTL_CONF:-/etc/sysctl.conf}"
+    local modules_load_conf="${BBR_MODULES_LOAD_CONF:-/etc/modules-load.d/bbr.conf}"
+    local sys_module_base="${BBR_SYS_MODULE_BASE:-/sys/module}"
+    local lib_modules_base="${BBR_LIB_MODULES_BASE:-/lib/modules}"
+    local kernel_release="${BBR_UNAME_R:-$(uname -r)}"
+
+    mkdir -p "$(dirname "$modules_load_conf")"
     # 确保文件存在（避免 grep 报 No such file or directory）
-    touch /etc/sysctl.conf
+    touch "$sysctl_conf" "$modules_load_conf"
 
-    # 检查并添加 net.core.default_qdisc 配置
-    if ! grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf; then
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        echo "已添加 net.core.default_qdisc=fq 配置"
-    else
-        echo "net.core.default_qdisc=fq 配置已存在，无需添加"
+    ensure_module_load_entry() {
+        local entry="$1"
+        if ! grep -qxF "$entry" "$modules_load_conf" 2>/dev/null; then
+            echo "$entry" >> "$modules_load_conf"
+            echo "已添加 modules-load 配置: $entry -> $modules_load_conf"
+        else
+            echo "modules-load 配置已存在，无需添加: $entry"
+        fi
+    }
+
+    ensure_sysctl_entry() {
+        local key="$1"
+        local value="$2"
+        if grep -qE "^[[:space:]]*${key}[[:space:]]*=[[:space:]]*${value}[[:space:]]*$" "$sysctl_conf" 2>/dev/null; then
+            echo "${key}=${value} 配置已存在，无需添加"
+        else
+            echo "${key}=${value}" >> "$sysctl_conf"
+            echo "已添加 ${key}=${value} 配置"
+        fi
+    }
+
+    bbr_module_loaded() {
+        if [ -d "${sys_module_base}/tcp_bbr" ]; then
+            return 0
+        fi
+        if command -v lsmod >/dev/null 2>&1 && lsmod 2>/dev/null | grep -q '^tcp_bbr'; then
+            return 0
+        fi
+        return 1
+    }
+
+    bbr_module_available() {
+        if bbr_module_loaded; then
+            return 0
+        fi
+        if command -v modinfo >/dev/null 2>&1 && modinfo -F filename tcp_bbr >/dev/null 2>&1; then
+            return 0
+        fi
+        # 兼容 .ko / .ko.xz / .ko.zst 等压缩后缀
+        if ls "${lib_modules_base}/${kernel_release}/kernel/net/ipv4/tcp_bbr.ko"* >/dev/null 2>&1; then
+            return 0
+        fi
+        if sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | tr ' ' '\n' | grep -qx 'bbr'; then
+            return 0
+        fi
+        return 1
+    }
+
+    # 先登记开机加载，保证 systemd-modules-load 在 systemd-sysctl 之前挂上模块。
+    ensure_module_load_entry "tcp_bbr"
+    ensure_module_load_entry "sch_fq"
+
+    # 当前会话立刻尝试加载（已内建时 modprobe 会失败，后续按 built-in 继续判断）。
+    if ! modprobe tcp_bbr 2>/dev/null; then
+        echo -e "${Yellow}modprobe tcp_bbr 未成功，继续检查是否为内建模块...${Font}"
+    fi
+    if ! modprobe sch_fq 2>/dev/null; then
+        echo -e "${Yellow}modprobe sch_fq 未成功，继续检查是否为内建模块...${Font}"
     fi
 
-    # 检查并添加 net.ipv4.tcp_congestion_control 配置
-    if ! grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        echo "已添加 net.ipv4.tcp_congestion_control=bbr 配置"
-    else
-        echo "net.ipv4.tcp_congestion_control=bbr 配置已存在，无需添加"
+    # 确认内核提供 tcp_bbr 后再写 sysctl，避免「配置写了但没生效」的假成功。
+    if ! bbr_module_available; then
+        echo -e "${Red}当前内核未提供 tcp_bbr 模块，BBR 开启失败，不写入 sysctl 配置。${Font}" >&2
+        return 1
     fi
 
-    sysctl -p >/dev/null || true
+    # 幂等写入 sysctl
+    ensure_sysctl_entry "net.core.default_qdisc" "fq"
+    ensure_sysctl_entry "net.ipv4.tcp_congestion_control" "bbr"
 
-    # 检查 BBR 是否成功开启
-    if sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null | grep -q '^bbr$'; then
+    # 不再吞掉 sysctl 失败，失败时明确返回非零。
+    if ! sysctl -p "$sysctl_conf"; then
+        echo -e "${Red}sysctl 应用失败，BBR 未生效。${Font}" >&2
+        return 1
+    fi
+    if ! sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null; then
+        echo -e "${Red}sysctl 写入 net.ipv4.tcp_congestion_control=bbr 失败。${Font}" >&2
+        return 1
+    fi
+    if ! sysctl -w net.core.default_qdisc=fq >/dev/null; then
+        echo -e "${Red}sysctl 写入 net.core.default_qdisc=fq 失败。${Font}" >&2
+        return 1
+    fi
+
+    # 成功判据：拥塞控制 + qdisc + 模块三者同时成立。
+    congestion=""
+    qdisc=""
+    congestion=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+
+    if [ "$congestion" = "bbr" ] && [ "$qdisc" = "fq" ] && bbr_module_loaded; then
+        # default_qdisc 只影响新建接口，已存在的网卡需要 best-effort 切到 fq。
+        if command -v tc >/dev/null 2>&1 && command -v ip >/dev/null 2>&1; then
+            iface_list=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1 || true)
+            for iface in $iface_list; do
+                if [ "$iface" = "lo" ] || [ -z "$iface" ]; then
+                    continue
+                fi
+                if ! tc qdisc replace dev "$iface" root fq 2>/dev/null; then
+                    echo -e "${Yellow}网卡 ${iface} 切换 qdisc 到 fq 失败，跳过（不影响 BBR 主流程）。${Font}"
+                fi
+            done
+        fi
         echo -e "${Green}BBR 已成功开启！${Font}"
-    else
-        echo -e "${Red}BBR 开启失败，请检查您的系统是否支持 BBR。${Font}"
+        return 0
     fi
+
+    echo -e "${Red}BBR 开启失败，请检查您的系统是否支持 BBR。${Font}" >&2
+    return 1
 }
 
 # 配置 fail2ban
