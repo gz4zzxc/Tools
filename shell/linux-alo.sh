@@ -715,15 +715,13 @@ setup_swap() {
 enable_bbr() {
     echo "开启 BBR..."
 
-    local sysctl_conf="${BBR_SYSCTL_CONF:-/etc/sysctl.conf}"
+    local sysctl_conf="${BBR_SYSCTL_CONF:-/etc/sysctl.d/90-bbr.conf}"
     local modules_load_conf="${BBR_MODULES_LOAD_CONF:-/etc/modules-load.d/bbr.conf}"
     local sys_module_base="${BBR_SYS_MODULE_BASE:-/sys/module}"
     local lib_modules_base="${BBR_LIB_MODULES_BASE:-/lib/modules}"
     local kernel_release="${BBR_UNAME_R:-$(uname -r)}"
 
-    mkdir -p "$(dirname "$modules_load_conf")"
-    # 确保文件存在（避免 grep 报 No such file or directory）
-    touch "$sysctl_conf" "$modules_load_conf"
+    mkdir -p "$(dirname "$sysctl_conf")" "$(dirname "$modules_load_conf")"
 
     ensure_module_load_entry() {
         local entry="$1"
@@ -773,10 +771,6 @@ enable_bbr() {
         return 1
     }
 
-    # 先登记开机加载，保证 systemd-modules-load 在 systemd-sysctl 之前挂上模块。
-    ensure_module_load_entry "tcp_bbr"
-    ensure_module_load_entry "sch_fq"
-
     # 当前会话立刻尝试加载（已内建时 modprobe 会失败，后续按 built-in 继续判断）。
     if ! modprobe tcp_bbr 2>/dev/null; then
         echo -e "${Yellow}modprobe tcp_bbr 未成功，继续检查是否为内建模块...${Font}"
@@ -785,11 +779,15 @@ enable_bbr() {
         echo -e "${Yellow}modprobe sch_fq 未成功，继续检查是否为内建模块...${Font}"
     fi
 
-    # 确认内核提供 tcp_bbr 后再写 sysctl，避免「配置写了但没生效」的假成功。
+    # 确认内核提供 tcp_bbr 后再写持久化配置，避免失败路径留下半截配置。
     if ! bbr_module_available; then
-        echo -e "${Red}当前内核未提供 tcp_bbr 模块，BBR 开启失败，不写入 sysctl 配置。${Font}" >&2
+        echo -e "${Red}当前内核未提供 tcp_bbr 模块，BBR 开启失败，不写入 sysctl / modules-load 配置。${Font}" >&2
         return 1
     fi
+
+    # 先登记开机加载，保证 systemd-modules-load 在 systemd-sysctl 之前挂上模块。
+    ensure_module_load_entry "tcp_bbr"
+    ensure_module_load_entry "sch_fq"
 
     # 幂等写入 sysctl
     ensure_sysctl_entry "net.core.default_qdisc" "fq"
@@ -816,18 +814,6 @@ enable_bbr() {
     qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
 
     if [ "$congestion" = "bbr" ] && [ "$qdisc" = "fq" ] && bbr_module_loaded; then
-        # default_qdisc 只影响新建接口，已存在的网卡需要 best-effort 切到 fq。
-        if command -v tc >/dev/null 2>&1 && command -v ip >/dev/null 2>&1; then
-            iface_list=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1 || true)
-            for iface in $iface_list; do
-                if [ "$iface" = "lo" ] || [ -z "$iface" ]; then
-                    continue
-                fi
-                if ! tc qdisc replace dev "$iface" root fq 2>/dev/null; then
-                    echo -e "${Yellow}网卡 ${iface} 切换 qdisc 到 fq 失败，跳过（不影响 BBR 主流程）。${Font}"
-                fi
-            done
-        fi
         echo -e "${Green}BBR 已成功开启！${Font}"
         return 0
     fi
