@@ -17,8 +17,8 @@ OS=""
 CODENAME=""
 VERSION_ID=""
 
-# 内置默认哈希（可通过环境变量覆盖）
-STARSHIP_INSTALL_SHA256_DEFAULT="eb6f59c6d1fb193fa28d6fc33a546a0df59539bb90bc8a6e043bda1589549d26"
+# 内置默认哈希（可通过环境变量覆盖；更新方法：curl -fsSL "$STARSHIP_INSTALL_HASH_SOURCE_URL_DEFAULT" | sha256sum）
+STARSHIP_INSTALL_SHA256_DEFAULT="52c64f14a558034ebeb1907ea9364e802b32474576fd3e68265f73bc33cc8fbb"
 OHMYZSH_INSTALL_SHA256_DEFAULT="ce0b7c94aa04d8c7a8137e45fe5c4744e3947871f785fd58117c480c1bf49352"
 STARSHIP_INSTALL_HASH_SOURCE_URL_DEFAULT="https://raw.githubusercontent.com/starship/starship/master/install/install.sh"
 OHMYZSH_INSTALL_HASH_SOURCE_URL_DEFAULT="https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh"
@@ -352,25 +352,46 @@ set_international_mirror() {
     echo -e "${Green}Debian 已切换为官方 Deb822 源配置。${Font}"
 }
 
-# 安装 Starship
+# 安装 Starship（默认上游最新稳定版）
+# Debian APT 冻结旧版（如 trixie 仅提供 1.22.x），因此默认走官方安装脚本装 latest；
+# APT 仅作为官方脚本不可用时的回退。可通过 STARSHIP_VERSION pin 版本（如 v1.26.0），为空则 latest。
 install_starship() {
-    echo "安装 Starship..."
-    # 优先尝试 APT 包（部分新版本 Debian 提供）
-    if apt-get install -y -qq starship >/dev/null 2>&1; then
-        echo -e "${Green}Starship 通过 APT 安装成功。版本：$(starship --version)${Font}"
+    echo "安装 Starship（默认上游最新稳定版）..."
+
+    starship_install_args="-y"
+    if [ -n "${STARSHIP_VERSION:-}" ]; then
+        starship_install_args="$starship_install_args -v $STARSHIP_VERSION"
+    fi
+
+    # shellcheck disable=SC2086
+    if run_verified_script "https://starship.rs/install.sh" "$STARSHIP_INSTALL_HASH_SOURCE_URL" "$STARSHIP_INSTALL_SHA256" "STARSHIP_INSTALL_SHA256" sh $starship_install_args; then
+        if command -v starship >/dev/null 2>&1; then
+            # 清理可能残留的旧 APT 包，避免 /usr/bin 旧版与 /usr/local/bin 新版共存混淆。
+            # 官方二进制在 /usr/local/bin，dpkg 不管理它，因此卸载 APT 包是安全的。
+            if dpkg -s starship >/dev/null 2>&1; then
+                echo "检测到 APT 旧版 Starship，正在卸载以避免版本混淆..."
+                apt-get remove -y starship >/dev/null 2>&1 || true
+            fi
+            if command -v starship >/dev/null 2>&1; then
+                echo -e "${Green}Starship 安装成功。版本：$(starship --version)${Font}"
+                return 0
+            fi
+            echo -e "${Yellow}Starship 安装后未检测到可执行文件，尝试 APT 回退。${Font}"
+        else
+            echo -e "${Yellow}Starship 安装后未检测到可执行文件，尝试 APT 回退。${Font}"
+        fi
+    else
+        echo -e "${Yellow}官方脚本安装 Starship 失败，尝试 APT 回退...${Font}"
+    fi
+
+    # 回退到 APT 包（版本会落后于上游，仅保证可用）
+    if apt-get install -y starship >/dev/null 2>&1; then
+        echo -e "${Yellow}Starship 通过 APT 回退安装成功（版本可能落后）。版本：$(starship --version)${Font}"
         return 0
     fi
 
-    # 回退到官方安装脚本（非交互）
-    if run_verified_script "https://starship.rs/install.sh" "$STARSHIP_INSTALL_HASH_SOURCE_URL" "$STARSHIP_INSTALL_SHA256" "STARSHIP_INSTALL_SHA256" sh -y; then
-        if command -v starship >/dev/null 2>&1; then
-            echo -e "${Green}Starship 安装成功。版本：$(starship --version)${Font}"
-        else
-            echo -e "${Yellow}Starship 安装后未检测到可执行文件，但继续执行下一步。${Font}"
-        fi
-    else
-        echo -e "${Yellow}Starship 安装失败，跳过此步骤，继续执行下一步。${Font}"
-    fi
+    echo -e "${Yellow}Starship 安装失败，跳过此步骤，继续执行下一步。${Font}"
+    return 1
 }
 
 # 配置 Starship
