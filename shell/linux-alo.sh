@@ -484,7 +484,12 @@ install_zsh_plugins() {
     source_block_start="# >>> linux-alo.sh managed zsh plugin sources >>>"
     source_block_end="# <<< linux-alo.sh managed zsh plugin sources <<<"
 
-    touch "$zshrc_file"
+    # 关键写操作必须显式检查：调用方以 `install_zsh_plugins || true`
+    # 容错时，函数体内部不再受 `set -e` 保护，隐式错误会被静默吞掉。
+    if ! touch "$zshrc_file"; then
+        echo -e "${Red}无法创建或访问 ${zshrc_file}${Font}"
+        return 1
+    fi
 
     # 这两个系统包不是 Oh My Zsh 插件，直接加载系统安装的脚本。
     missing_package_file=0
@@ -502,13 +507,20 @@ install_zsh_plugins() {
 
     # 删除本脚本之前写入的 source 块，保证重复执行不会累积配置。
     if grep -qF "$source_block_start" "$zshrc_file"; then
-        tmp_zshrc=$(mktemp)
+        if ! tmp_zshrc=$(mktemp); then
+            echo -e "${Red}无法创建临时文件${Font}"
+            return 1
+        fi
         if awk -v start="$source_block_start" -v end="$source_block_end" '
             $0 == start { skipping=1; next }
             $0 == end { skipping=0; next }
             !skipping { print }
         ' "$zshrc_file" > "$tmp_zshrc"; then
-            mv "$tmp_zshrc" "$zshrc_file"
+            if ! mv "$tmp_zshrc" "$zshrc_file"; then
+                rm -f "$tmp_zshrc"
+                echo -e "${Red}更新 ${zshrc_file} 失败${Font}"
+                return 1
+            fi
         else
             rm -f "$tmp_zshrc"
             echo -e "${Yellow}清理 .zshrc 插件配置失败，保留原文件。${Font}"
@@ -517,7 +529,10 @@ install_zsh_plugins() {
 
     # 在任何追加操作前，修复非空 .zshrc 缺少 EOF newline 的情况。
     if [ -s "$zshrc_file" ] && [ "$(tail -c 1 "$zshrc_file" | wc -l)" -eq 0 ]; then
-        printf '\n' >> "$zshrc_file"
+        if ! printf '\n' >> "$zshrc_file"; then
+            echo -e "${Red}更新 ${zshrc_file} 失败${Font}"
+            return 1
+        fi
     fi
 
     # 系统包不应再作为 Oh My Zsh 插件名加载，避免重复加载或找不到 .plugin.zsh。
@@ -525,7 +540,10 @@ install_zsh_plugins() {
         plugins_line_new="plugins=(git)"
 
         if grep -qE '^[[:space:]]*plugins[[:space:]]*=[[:space:]]*\(' "$zshrc_file"; then
-            tmp_zshrc=$(mktemp)
+            if ! tmp_zshrc=$(mktemp); then
+                echo -e "${Red}无法创建临时文件${Font}"
+                return 1
+            fi
             if awk -v new_line="$plugins_line_new" '
                 BEGIN { replaced=0 }
                 /^[[:space:]]*#/ { print; next }
@@ -536,19 +554,26 @@ install_zsh_plugins() {
                 }
                 { print }
             ' "$zshrc_file" > "$tmp_zshrc"; then
-                mv "$tmp_zshrc" "$zshrc_file"
+                if ! mv "$tmp_zshrc" "$zshrc_file"; then
+                    rm -f "$tmp_zshrc"
+                    echo -e "${Red}更新 ${zshrc_file} 失败${Font}"
+                    return 1
+                fi
             else
                 rm -f "$tmp_zshrc"
                 echo -e "${Yellow}更新 .zshrc 插件配置失败，保留原文件。${Font}"
             fi
         else
-            echo "$plugins_line_new" >> "$zshrc_file"
+            if ! echo "$plugins_line_new" >> "$zshrc_file"; then
+                echo -e "${Red}更新 ${zshrc_file} 失败${Font}"
+                return 1
+            fi
         fi
     fi
 
     # autosuggestions 先加载；syntax-highlighting 必须放在最后。
     if [ -f "$autosuggestions_file" ] || [ -f "$syntax_highlighting_file" ]; then
-        {
+        if ! {
             printf '%s\n' "$source_block_start"
             if [ -f "$autosuggestions_file" ]; then
                 printf 'source "%s"\n' "$autosuggestions_file"
@@ -557,7 +582,10 @@ install_zsh_plugins() {
                 printf 'source "%s"\n' "$syntax_highlighting_file"
             fi
             printf '%s\n' "$source_block_end"
-        } >> "$zshrc_file"
+        } >> "$zshrc_file"; then
+            echo -e "${Red}更新 ${zshrc_file} 失败${Font}"
+            return 1
+        fi
     fi
 
     echo -e "${Green}zsh 插件配置完成。${Font}"
