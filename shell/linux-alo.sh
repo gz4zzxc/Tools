@@ -1107,8 +1107,8 @@ main() {
     echo "设置 Zsh 为默认终端..."
     chsh -s "$(command -v zsh)" || echo -e "${Yellow}更改默认 shell 失败，请手动执行 chsh 命令.${Font}"
 
-    # 安装 oh-my-zsh
-    install_oh_my_zsh
+    # 安装 oh-my-zsh：失败仅跳过，不中断后续步骤（脚本启用 set -e，必须显式处理非零返回）
+    install_oh_my_zsh || true
 
     # 安装 Starship：失败仅跳过，不中断后续步骤（脚本启用 set -e，必须显式处理非零返回）
     install_starship || true
@@ -1116,8 +1116,8 @@ main() {
     # 配置 Starship
     configure_starship
 
-    # 安装并启用 zsh 插件
-    install_zsh_plugins
+    # 安装并启用 zsh 插件：失败仅跳过，不中断后续步骤（脚本启用 set -e，必须显式处理非零返回）
+    install_zsh_plugins || true
 
     # 修改 SSH 配置
     configure_ssh
